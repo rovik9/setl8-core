@@ -13,14 +13,20 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
-idl-build = ["anchor-lang/idl-build"]
+# Forwarded to setl8-shared-interfaces so its `ChallengeSize` gets a real
+# `anchor_lang::IdlBuild` impl during `anchor build`'s IDL-generation pass.
+# That crate has zero anchor-lang dependency otherwise, by design (see its
+# Cargo.toml) — this feature is the only place that changes.
+idl-build = ["anchor-lang/idl-build", "setl8-shared-interfaces/idl-build"]
 default = []
 
 [dependencies]
 anchor-lang = "0.32.1"
 
-# Pinned to the v0.2.0 tag, not a floating branch, so a shape change on the
+# Pinned to the v0.2.1 tag, not a floating branch, so a shape change on the
 # shared-interfaces side (new instruction, changed discriminator/account
 # layout) never silently breaks this program on a fresh `cargo build` — a
 # bump only happens when someone deliberately moves the tag pin below.
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.2.0" }
+# v0.2.1 is the release that added the optional idl-build feature this
+# program's own idl-build feature (above) forwards into.
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.2.1" }
