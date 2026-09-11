@@ -1,0 +1,18 @@
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+core_vault = "2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "node --no-experimental-strip-types node_modules/.bin/mocha -r ts-node/register -t 1000000 tests/**/*.ts"

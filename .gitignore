@@ -1,2 +1,10 @@
 .claude/worktrees/
 .DS_Store
+
+# Rust / Anchor / Solana
+/target
+/.anchor
+test-ledger/
+
+# Node
+/node_modules
