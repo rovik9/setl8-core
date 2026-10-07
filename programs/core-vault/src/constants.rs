@@ -61,3 +61,18 @@ pub const MAX_CHALLENGE_SIZES: usize = 32;
 /// u64`) from `setl8-shared-interfaces`. That crate defines the struct, not
 /// its serialized size, so it's recomputed here from its two `u64` fields.
 pub const CHALLENGE_SIZE_SPACE: usize = 8 + 8;
+
+/// Seed for the singleton `VaultState` PDA: `[VAULT_STATE_SEED,
+/// SL8_ADMIN_PUBKEY, ROV_ADMIN_PUBKEY]`.
+pub const VAULT_STATE_SEED: &[u8] = b"vault_state";
+
+/// Seed for the two payout-pool token accounts: `[POOL_SEED, vault_state,
+/// mint]`. Their token authority is the `VaultState` PDA.
+pub const POOL_SEED: &[u8] = b"pool";
+
+/// Both accepted stablecoins (USDC, USDT) are 6-decimal classic-SPL mints.
+/// Every amount in the vault is in these base units.
+pub const TOKEN_DECIMALS: u8 = 6;
+
+/// Basis-point denominator for `fee_split_bps` and the reset price table.
+pub const BPS_DENOMINATOR: u128 = 10_000;

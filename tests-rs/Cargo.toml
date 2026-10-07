@@ -18,3 +18,5 @@ solana-signer = "2"
 solana-transaction = "2"
 solana-message = "2"
 solana-transaction-error = "2"
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token"] }
+solana-account = "2"

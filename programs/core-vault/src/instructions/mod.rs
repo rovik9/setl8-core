@@ -1,6 +1,7 @@
 mod deposit_fee;
 mod deposit_reset;
 mod flag_trader_failed;
+mod init_vault;
 mod mark_abandoned;
 mod pause_product;
 mod record_activity;
@@ -12,6 +13,7 @@ mod update_product_config;
 pub use deposit_fee::*;
 pub use deposit_reset::*;
 pub use flag_trader_failed::*;
+pub use init_vault::*;
 pub use mark_abandoned::*;
 pub use pause_product::*;
 pub use record_activity::*;

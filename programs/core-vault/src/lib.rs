@@ -22,6 +22,12 @@ declare_id!("2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft");
 pub mod core_vault {
     use super::*;
 
+    /// One-time vault setup: records the USDC/USDT mints and creates the two
+    /// payout-pool token accounts. See `instructions::init_vault`.
+    pub fn init_vault(ctx: Context<InitVault>, usdc_mint: Pubkey, usdt_mint: Pubkey) -> Result<()> {
+        instructions::init_vault(ctx, usdc_mint, usdt_mint)
+    }
+
     pub fn register_product(
         ctx: Context<RegisterProduct>,
         product_program_id: Pubkey,

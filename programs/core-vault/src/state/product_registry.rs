@@ -15,8 +15,8 @@ pub struct ProductRegistry {
     /// Challenge size/cost tiers this product offers. Bounded to
     /// `MAX_CHALLENGE_SIZES` entries by the account's fixed on-chain space.
     pub challenge_sizes: Vec<ChallengeSize>,
-    /// Basis points of collected fees this product's operator receives
-    /// (e.g. 6500 for 65%).
+    /// Basis points of every fee / reset payment that goes into the payout
+    /// pool (e.g. 6500 for 65%); the remainder goes to the SL8 wallet.
     pub fee_split_bps: u16,
     /// Cap on outstanding payouts the vault will allow for this product.
     pub max_payout_count: u64,

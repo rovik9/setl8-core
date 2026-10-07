@@ -73,4 +73,16 @@ pub enum VaultError {
 
     #[msg("arithmetic overflow")]
     MathOverflow,
+
+    #[msg("mint is not a valid classic-SPL Mint, or is not one of the vault's mints")]
+    InvalidMint,
+
+    #[msg("usdc_mint and usdt_mint must be two different mints")]
+    DuplicateMint,
+
+    #[msg("mint must have exactly 6 decimals")]
+    InvalidDecimals,
+
+    #[msg("account is not owned by the classic SPL Token program")]
+    WrongTokenProgram,
 }

@@ -14,7 +14,13 @@ use anchor_lang::solana_program::{
     pubkey::Pubkey,
     system_program,
 };
-use anchor_lang::AccountDeserialize;
+use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
+use anchor_spl::token::spl_token::{
+    self,
+    solana_program::{program_option::COption, program_pack::Pack},
+    state::{Account as SplAccount, AccountState, Mint as SplMint},
+};
+use solana_account::Account as RawAccount;
 use core_vault::{
     errors::VaultError,
     state::{ProductRegistry, TraderState},
@@ -38,6 +44,9 @@ pub use core_vault::constants::{
 };
 pub use core_vault::state::TraderStatus;
 
+/// Token-2022 program id (present in LiteSVM's default programs, always rejected by the vault).
+pub const TOKEN_2022_ID: Pubkey =
+    anchor_lang::prelude::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 pub const T0: i64 = 1_700_000_000;
 pub const DAY: i64 = 86_400;
 
@@ -124,16 +133,50 @@ pub struct Env {
     pub sl8: Keypair,
     pub rov: Keypair,
     pub payer: Keypair,
+    /// Classic-SPL 6-decimal mints standing in for USDC / USDT.
+    pub usdc: Pubkey,
+    pub usdt: Pubkey,
+    /// `VaultState` PDA and the two pool token accounts (PDAs) it owns.
+    pub vault: Pubkey,
+    pub usdc_pool: Pubkey,
+    pub usdt_pool: Pubkey,
+    /// SL8-side destination token accounts (owner = SL8_ADMIN_PUBKEY).
+    pub sl8_usdc: Pubkey,
+    pub sl8_usdt: Pubkey,
+}
+
+pub fn vault_pda() -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"vault_state",
+            core_vault::constants::SL8_ADMIN_PUBKEY.as_ref(),
+            core_vault::constants::ROV_ADMIN_PUBKEY.as_ref(),
+        ],
+        &core_vault::ID,
+    )
+    .0
+}
+
+pub fn pool_pda(vault: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool", vault.as_ref(), mint.as_ref()], &core_vault::ID).0
 }
 
 impl Env {
-    /// Sigverify OFF: PDA signers (sector_authority) can be flagged as signers
-    /// without a signature. Real keys are still used where we have them.
+    /// Sigverify OFF, vault initialised (`init_vault` run for real).
+    /// PDA signers (sector_authority) can be flagged as signers without a
+    /// signature. Real keys are still used where we have them.
     pub fn new() -> Self {
+        let mut e = Self::build(false);
+        e.init_vault();
+        e
+    }
+
+    /// As `new()` but the vault has NOT been initialised (for init_vault tests).
+    pub fn new_bare() -> Self {
         Self::build(false)
     }
 
-    /// Sigverify ON: signatures are really checked.
+    /// Sigverify ON, vault not initialised: signatures are really checked.
     pub fn new_sigverify_on() -> Self {
         Self::build(true)
     }
@@ -155,11 +198,90 @@ impl Env {
         assert_eq!(sl8.pubkey(), core_vault::constants::SL8_ADMIN_PUBKEY, "fixture/const drift");
         assert_eq!(rov.pubkey(), core_vault::constants::ROV_ADMIN_PUBKEY, "fixture/const drift");
         let payer = Keypair::new();
-        let mut env = Self { svm, sl8, rov, payer };
+        let (usdc, usdt) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let vault = vault_pda();
+        let mut env = Self {
+            svm,
+            sl8,
+            rov,
+            payer,
+            usdc,
+            usdt,
+            vault,
+            usdc_pool: pool_pda(&vault, &usdc),
+            usdt_pool: pool_pda(&vault, &usdt),
+            sl8_usdc: Pubkey::default(),
+            sl8_usdt: Pubkey::default(),
+        };
         for k in [env.sl8.pubkey(), env.rov.pubkey(), env.payer.pubkey()] {
             env.fund(&k);
         }
+        env.set_mint(&usdc, 6, spl_token::ID);
+        env.set_mint(&usdt, 6, spl_token::ID);
+        let sl8_pk = env.sl8.pubkey();
+        env.sl8_usdc = env.new_token_account(&usdc, &sl8_pk, 0);
+        env.sl8_usdt = env.new_token_account(&usdt, &sl8_pk, 0);
         env
+    }
+
+    /// Runs the real `init_vault` for this env's USDC/USDT mints.
+    pub fn init_vault(&mut self) {
+        let ix = init_vault_ix(self, self.usdc, self.usdt);
+        self.ok(ix);
+    }
+
+    // ---- raw token state (set directly; the token program itself is real)
+    pub fn set_raw(&mut self, addr: &Pubkey, data: Vec<u8>, owner: Pubkey) {
+        let lamports = self.svm.minimum_balance_for_rent_exemption(data.len());
+        self.svm
+            .set_account(*addr, RawAccount { lamports, data, owner, executable: false, rent_epoch: 0 })
+            .unwrap();
+    }
+    /// A mint with `decimals`, owned by `owner_program` (classic or Token-2022).
+    pub fn set_mint(&mut self, addr: &Pubkey, decimals: u8, owner_program: Pubkey) {
+        let mut data = vec![0u8; SplMint::LEN];
+        SplMint::pack(
+            SplMint {
+                mint_authority: COption::None,
+                supply: 0,
+                decimals,
+                is_initialized: true,
+                freeze_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        self.set_raw(addr, data, owner_program);
+    }
+    pub fn set_token_account(&mut self, addr: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) {
+        let mut data = vec![0u8; SplAccount::LEN];
+        SplAccount::pack(
+            SplAccount {
+                mint: *mint,
+                owner: *owner,
+                amount,
+                delegate: COption::None,
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        self.set_raw(addr, data, spl_token::ID);
+    }
+    pub fn new_token_account(&mut self, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Pubkey {
+        let addr = Pubkey::new_unique();
+        self.set_token_account(&addr, mint, owner, amount);
+        addr
+    }
+    pub fn token_state(&self, addr: &Pubkey) -> SplAccount {
+        let a = self.svm.get_account(addr).expect("token account");
+        SplAccount::unpack(&a.data).expect("valid token account")
+    }
+    pub fn token_balance(&self, addr: &Pubkey) -> u64 {
+        self.token_state(addr).amount
     }
 
     pub fn fund(&mut self, who: &Pubkey) {
@@ -257,6 +379,11 @@ impl Env {
     }
 
     // ---- decoding
+    pub fn vault_state(&self) -> core_vault::state::VaultState {
+        let a = self.svm.get_account(&self.vault).expect("vault_state account");
+        assert_eq!(a.owner, core_vault::ID);
+        core_vault::state::VaultState::try_deserialize(&mut a.data.as_slice()).unwrap()
+    }
     pub fn registry(&self, s: &Sector) -> ProductRegistry {
         let a = self.svm.get_account(&s.registry()).expect("registry account");
         assert_eq!(a.owner, core_vault::ID);
@@ -282,6 +409,30 @@ impl Env {
 
 fn sys() -> AccountMeta {
     AccountMeta::new_readonly(system_program::ID, false)
+}
+
+/// Account metas in the program's declared order:
+/// 0 sl8_admin, 1 rov_admin, 2 vault_state, 3 usdc_mint, 4 usdt_mint,
+/// 5 usdc_pool, 6 usdt_pool, 7 token_program, 8 system_program.
+/// Built from the program crate's own generated client types.
+pub fn init_vault_ix(e: &Env, usdc_mint: Pubkey, usdt_mint: Pubkey) -> Instruction {
+    let vault = vault_pda();
+    let accounts = core_vault::accounts::InitVault {
+        sl8_admin: e.sl8.pubkey(),
+        rov_admin: e.rov.pubkey(),
+        vault_state: vault,
+        usdc_mint,
+        usdt_mint,
+        usdc_pool: pool_pda(&vault, &usdc_mint),
+        usdt_pool: pool_pda(&vault, &usdt_mint),
+        token_program: spl_token::ID,
+        system_program: system_program::ID,
+    };
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: accounts.to_account_metas(None),
+        data: core_vault::instruction::InitVault { usdc_mint, usdt_mint }.data(),
+    }
 }
 
 pub fn register_ix(e: &Env, s: &Sector, c: &Cfg) -> Instruction {

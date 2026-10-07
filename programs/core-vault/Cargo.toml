@@ -17,11 +17,22 @@ cpi = ["no-entrypoint"]
 # `anchor_lang::IdlBuild` impl during `anchor build`'s IDL-generation pass.
 # That crate has zero anchor-lang dependency otherwise, by design (see its
 # Cargo.toml) — this feature is the only place that changes.
-idl-build = ["anchor-lang/idl-build", "setl8-shared-interfaces/idl-build"]
+# anchor-spl 0.32.1's own idl-build module unconditionally names
+# `token_interface`, which only exists with its `token_2022` feature. Enabling
+# that feature HERE (IDL generation only) keeps the on-chain program on the
+# classic `token` feature alone: Token-2022 code is never linked into the .so.
+idl-build = [
+    "anchor-lang/idl-build",
+    "anchor-spl/idl-build",
+    "anchor-spl/token_2022",
+    "setl8-shared-interfaces/idl-build",
+]
 default = []
 
 [dependencies]
 anchor-lang = "0.32.1"
+# Classic SPL Token only (Token-2022 is rejected by design); `token` feature only.
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token"] }
 
 # Pinned to a release tag, not a floating branch, so a shape change on the
 # shared-interfaces side (new instruction, changed discriminator/account
