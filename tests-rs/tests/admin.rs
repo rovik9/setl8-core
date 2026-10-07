@@ -33,6 +33,38 @@ fn register_with_real_signatures_sigverify_on_and_missing_signature_fails() {
 }
 
 #[test]
+fn register_succeeds_when_the_fee_payer_is_a_third_party_not_sl8_admin() {
+    // Regression for shared-interfaces v0.3.0, whose builder marked sl8_admin
+    // read-only: the runtime then rejected the tx with PrivilegeEscalation
+    // unless sl8_admin was also the fee payer. Builder used exactly as shipped.
+    let mut e = Env::new();
+    let s = Sector::new();
+    let ix = register_ix(&e, &s, &Cfg::default());
+    assert!(ix.accounts[0].is_signer && ix.accounts[0].is_writable, "builder: sl8_admin is [signer, writable]");
+    assert!(ix.accounts[1].is_signer && !ix.accounts[1].is_writable, "builder: rov_admin is [signer]");
+
+    assert_ne!(e.payer.pubkey(), e.sl8.pubkey(), "fee payer must be a third party");
+    let (sl8_before, payer_before) = (
+        e.svm.get_balance(&e.sl8.pubkey()).unwrap(),
+        e.svm.get_balance(&e.payer.pubkey()).unwrap(),
+    );
+    // third-party payer pays the fee; sl8 and rov co-sign (really signed here too)
+    assert_ok(e.send(ix));
+
+    assert!(e.registry(&s).active);
+    let rent = e.svm.minimum_balance_for_rent_exemption(core_vault::state::ProductRegistry::SPACE);
+    assert_eq!(
+        sl8_before - e.svm.get_balance(&e.sl8.pubkey()).unwrap(),
+        rent,
+        "sl8_admin (not the fee payer) funds the registry rent"
+    );
+    assert!(
+        payer_before - e.svm.get_balance(&e.payer.pubkey()).unwrap() < rent,
+        "the fee payer only paid the tx fee"
+    );
+}
+
+#[test]
 fn register_initializes_every_registry_field() {
     let (e, s) = Env::registered(&Cfg::default());
     let r = e.registry(&s);

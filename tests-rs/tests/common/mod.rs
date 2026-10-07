@@ -285,7 +285,7 @@ fn sys() -> AccountMeta {
 }
 
 pub fn register_ix(e: &Env, s: &Sector, c: &Cfg) -> Instruction {
-    let mut ix = si::register_product(
+    si::register_product(
         core_vault::ID,
         e.sl8.pubkey(),
         e.rov.pubkey(),
@@ -298,13 +298,7 @@ pub fn register_ix(e: &Env, s: &Sector, c: &Cfg) -> Instruction {
             max_payout_count: c.max_payout,
             reset_price_bps: c.reset_bps.clone(),
         },
-    );
-    // shared-interfaces v0.3.0's builder marks sl8_admin READ-ONLY, but the
-    // vault makes it the `init` payer (writable). That only works when
-    // sl8_admin is also the tx fee payer; with any other fee payer the runtime
-    // rejects it (PrivilegeEscalation). Patched here, test-side only.
-    ix.accounts[0].is_writable = true;
-    ix
+    )
 }
 
 pub fn update_ix(e: &Env, s: &Sector, c: &Cfg) -> Instruction {

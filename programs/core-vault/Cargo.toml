@@ -23,13 +23,13 @@ default = []
 [dependencies]
 anchor-lang = "0.32.1"
 
-# Pinned to the v0.2.1 tag, not a floating branch, so a shape change on the
+# Pinned to a release tag, not a floating branch, so a shape change on the
 # shared-interfaces side (new instruction, changed discriminator/account
 # layout) never silently breaks this program on a fresh `cargo build` — a
 # bump only happens when someone deliberately moves the tag pin below.
 # v0.3.0 adds record_activity / mark_abandoned / deposit_reset /
 # pause_product, the Activity/Payout outcome enums, reset_price_bps on
 # register/update, and trader_wallet + account_size on DepositFeeArgs.
-# (idl-build was added in v0.2.1.) The v0.3.0 tag must exist on the remote
-# before this resolves -- see the hand-over notes.
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.0" }
+# (idl-build was added in v0.2.1.) v0.3.1 fixes the register_product builder
+# (sl8_admin is writable: it pays the registry rent).
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.1" }

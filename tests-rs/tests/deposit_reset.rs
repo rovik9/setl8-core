@@ -229,3 +229,87 @@ fn unknown_prev_record_is_rejected() {
     let r = reset(&mut e, &s, &w, 77, 2, 100, 0);
     assert_anchor_err(&r, ErrorCode::AccountNotInitialized);
 }
+
+// ------------------------------------------------------------ chained resets
+
+/// Pins "unlimited resets" as intended: every reset record starts with
+/// `reset_used = false`, so a record that fails again can be reset again.
+/// Only the *consumed predecessor* is single-use.
+fn run_chain(tier: (u64, u64)) {
+    let cfg = Cfg::default();
+    let size = tier.0;
+    let (mut e, s) = Env::registered(&cfg);
+    let w = wallet();
+
+    // deposit (size S), pay out once, fail it
+    e.deposit_tier(&s, &w, 1, tier);
+    e.advance(DAY);
+    e.payout(&s, &w, 1, 500, 1);
+    e.flag(&s, &w, 1);
+    assert_eq!(e.trader(&s, &w, 1).payout_count, 1);
+
+    // three resets, each priced for the phase supplied (0, 1, 2 -- all different)
+    let mut consumed: Vec<u64> = vec![];
+    for (step, phase) in [0u8, 1, 2].into_iter().enumerate() {
+        let (prev, new) = (step as u64 + 1, step as u64 + 2);
+        let amount = price(size, cfg.reset_bps[phase as usize]);
+        e.advance(DAY);
+
+        // the previous phase's price (or any other phase's) is the wrong price here
+        if step > 0 {
+            let stale_price = price(size, cfg.reset_bps[phase as usize - 1]);
+            if stale_price != amount {
+                assert_vault_err(&reset(&mut e, &s, &w, prev, new, stale_price, phase), VaultError::WrongAmount);
+                assert!(e.trader_opt(&s, &w, new).is_none());
+                assert!(!e.trader(&s, &w, prev).reset_used, "a rejected reset must not burn the single use");
+            }
+        }
+
+        assert_ok(reset(&mut e, &s, &w, prev, new, amount, phase));
+        consumed.push(prev);
+
+        let fresh = e.trader(&s, &w, new);
+        assert_eq!(fresh.status, TraderStatus::Active, "step {step}");
+        assert_eq!(fresh.payout_count, 1, "payout_count carried unchanged (step {step})");
+        assert_eq!(fresh.account_size, size, "account_size carried unchanged (step {step})");
+        assert!(!fresh.reset_used, "new record is not yet consumed (step {step})");
+        assert_eq!(fresh.challenge_id, new);
+        assert_eq!(fresh.last_activity_timestamp, e.now());
+
+        // every consumed predecessor so far: used, still Failed, data unchanged
+        for &old in &consumed {
+            let o = e.trader(&s, &w, old);
+            assert!(o.reset_used, "predecessor {old} must be consumed (step {step})");
+            assert_eq!(o.status, TraderStatus::Failed);
+            assert_eq!((o.payout_count, o.account_size), (1, size));
+        }
+
+        // a consumed predecessor can never be reset a second time
+        assert_vault_err(&reset(&mut e, &s, &w, prev, new + 100, amount, phase), VaultError::ResetNotAllowed);
+        assert!(e.trader_opt(&s, &w, new + 100).is_none());
+
+        // the new record fails in turn (except after the last reset)
+        if step < 2 {
+            e.flag(&s, &w, new);
+        }
+    }
+
+    // end state: ids 1,2,3 consumed+Failed; id 4 live and unconsumed
+    let last = e.trader(&s, &w, 4);
+    assert_eq!(last.status, TraderStatus::Active);
+    assert!(!last.reset_used);
+    // ...and the payout sequence continues where the original left off
+    assert_vault_err(&e.send(payout_ix(&s, &w, 4, 10, 1)), VaultError::RequestIdMismatch);
+    e.payout(&s, &w, 4, 10, 2);
+    assert_eq!(e.trader(&s, &w, 4).payout_count, 2);
+}
+
+#[test]
+fn chained_resets_are_unlimited_and_carry_state_even_prices() {
+    run_chain(TIER_B); // 50_000: 500 / 750 / 2_250 exactly
+}
+
+#[test]
+fn chained_resets_are_unlimited_and_carry_state_floored_prices() {
+    run_chain(TIER_ODD); // 12_345: 123 / 185 / 555 (floor)
+}
