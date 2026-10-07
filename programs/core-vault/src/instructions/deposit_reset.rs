@@ -1,9 +1,12 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{Mint, Token, TokenAccount};
 
-use crate::constants::{PRODUCT_REGISTRY_SEED, TRADER_STATE_SEED};
+use crate::constants::{
+    PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED, VAULT_STATE_SEED,
+};
 use crate::errors::VaultError;
-use crate::instructions::assert_sector_authority;
-use crate::state::{ProductRegistry, TraderState, TraderStatus};
+use crate::instructions::{assert_sector_authority, plan_payment, Payment};
+use crate::state::{ProductRegistry, TraderState, TraderStatus, VaultState};
 
 #[derive(Accounts)]
 #[instruction(
@@ -21,7 +24,7 @@ pub struct DepositReset<'info> {
         seeds = [PRODUCT_REGISTRY_SEED, product_program_id.as_ref()],
         bump = product_registry.bump,
     )]
-    pub product_registry: Account<'info, ProductRegistry>,
+    pub product_registry: Box<Account<'info, ProductRegistry>>,
 
     #[account(
         mut,
@@ -33,7 +36,7 @@ pub struct DepositReset<'info> {
         ],
         bump = prev_trader_state.bump,
     )]
-    pub prev_trader_state: Account<'info, TraderState>,
+    pub prev_trader_state: Box<Account<'info, TraderState>>,
 
     #[account(
         init,
@@ -47,12 +50,57 @@ pub struct DepositReset<'info> {
         ],
         bump,
     )]
-    pub new_trader_state: Account<'info, TraderState>,
+    pub new_trader_state: Box<Account<'info, TraderState>>,
 
     #[account(mut)]
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+
+    // ---- token movement (appended; everything above keeps its position) ----
+    #[account(
+        seeds = [VAULT_STATE_SEED, SL8_ADMIN_PUBKEY.as_ref(), ROV_ADMIN_PUBKEY.as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Box<Account<'info, VaultState>>,
+
+    /// The paying trader. Must sign and must be the `trader_wallet` argument.
+    #[account(address = trader_wallet @ VaultError::TraderWalletMismatch)]
+    pub trader: Signer<'info>,
+
+    /// The trader's own token account for `mint` (source of the payment).
+    #[account(
+        mut,
+        constraint = trader_token_account.owner == trader.key() && trader_token_account.mint == mint.key()
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub trader_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// The stablecoin being paid: exactly one of the vault's two mints.
+    #[account(
+        constraint = mint.key() == vault_state.usdc_mint || mint.key() == vault_state.usdt_mint
+            @ VaultError::InvalidMint,
+    )]
+    pub mint: Box<Account<'info, Mint>>,
+
+    /// The vault's payout pool for `mint`.
+    #[account(
+        mut,
+        constraint = Some(pool_token_account.key()) == vault_state.pool_for(&mint.key())
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// SL8's destination: any `mint` token account owned by `vault_state.sl8_wallet`.
+    #[account(
+        mut,
+        constraint = sl8_token_account.owner == vault_state.sl8_wallet && sl8_token_account.mint == mint.key()
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub sl8_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// Classic SPL Token only: Token-2022 fails the program-id check.
+    pub token_program: Program<'info, Token>,
 }
 
 /// Phase-specific reset: restart at a reduced price instead of a full rebuy.
@@ -62,6 +110,11 @@ pub struct DepositReset<'info> {
 /// than they have left. `reset_phase` is sector-supplied and used only to
 /// pick the price; the worst a wrong value does is mis-price a reset.
 /// Only a `Failed` record can be reset (not `Abandoned`), once.
+///
+/// The reset price is then paid like a fee: from the trader's own token
+/// account, split between the payout pool and the SL8 wallet per the
+/// product's `fee_split_bps`. The trader must sign. A rejected payment reverts
+/// the whole transaction, so it never burns `reset_used`.
 pub fn deposit_reset(
     ctx: Context<DepositReset>,
     amount: u64,
@@ -91,6 +144,9 @@ pub fn deposit_reset(
         / 10_000u128;
     require!(amount as u128 == expected, VaultError::WrongAmount);
 
+    let (pool_amount, sl8_amount) =
+        plan_payment(amount, registry.fee_split_bps, &ctx.accounts.trader_token_account)?;
+
     let now = Clock::get()?.unix_timestamp;
     let paused_now = registry.paused_secs_at(now);
 
@@ -108,7 +164,13 @@ pub fn deposit_reset(
     ts.reset_used = false;
     ts.bump = ctx.bumps.new_trader_state;
 
-    // TODO Module 2b: move `amount` into the payout pool (same split as
-    // deposit_fee).
-    Ok(())
+    Payment {
+        trader: &ctx.accounts.trader,
+        trader_token_account: &ctx.accounts.trader_token_account,
+        mint: &ctx.accounts.mint,
+        pool_token_account: &ctx.accounts.pool_token_account,
+        sl8_token_account: &ctx.accounts.sl8_token_account,
+        token_program: &ctx.accounts.token_program,
+    }
+    .execute(pool_amount, sl8_amount)
 }

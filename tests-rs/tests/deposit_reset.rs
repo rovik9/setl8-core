@@ -20,7 +20,8 @@ fn failed(cfg: &Cfg, tier: (u64, u64)) -> (Env, Sector, Pubkey) {
 }
 
 fn reset(e: &mut Env, s: &Sector, w: &Pubkey, prev: u64, new: u64, amount: u64, phase: u8) -> litesvm::types::TransactionResult {
-    let ix = reset_ix(s, w, prev, new, amount, phase, &e.payer.pubkey());
+    e.fund_wallet(w);
+    let ix = reset_ix(e, s, w, prev, new, amount, phase);
     e.send(ix)
 }
 
@@ -201,7 +202,7 @@ fn rejected_while_product_is_paused() {
 #[test]
 fn stranger_authority_is_unauthorized() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    let mut ix = reset_ix(&s, &w, 1, 2, 100, 0, &e.payer.pubkey());
+    let mut ix = reset_ix(&e, &s, &w, 1, 2, 100, 0);
     ix.accounts[0].pubkey = Pubkey::new_unique();
     assert_vault_err(&e.send(ix), VaultError::Unauthorized);
     assert!(e.trader_opt(&s, &w, 2).is_none());
@@ -210,7 +211,7 @@ fn stranger_authority_is_unauthorized() {
 #[test]
 fn another_sectors_authority_is_unauthorized() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    let mut ix = reset_ix(&s, &w, 1, 2, 100, 0, &e.payer.pubkey());
+    let mut ix = reset_ix(&e, &s, &w, 1, 2, 100, 0);
     ix.accounts[0].pubkey = Sector::new().authority;
     assert_vault_err(&e.send(ix), VaultError::Unauthorized);
 }
@@ -218,7 +219,7 @@ fn another_sectors_authority_is_unauthorized() {
 #[test]
 fn authority_that_is_not_a_signer_is_rejected() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    let mut ix = reset_ix(&s, &w, 1, 2, 100, 0, &e.payer.pubkey());
+    let mut ix = reset_ix(&e, &s, &w, 1, 2, 100, 0);
     ix.accounts[0].is_signer = false;
     assert_anchor_err(&e.send(ix), ErrorCode::AccountNotSigner);
 }
@@ -265,8 +266,26 @@ fn run_chain(tier: (u64, u64)) {
             }
         }
 
+        let snap = e.token_snapshot();
         assert_ok(reset(&mut e, &s, &w, prev, new, amount, phase));
         consumed.push(prev);
+
+        // tokens: exact price out of the trader, split floor/remainder, nothing lost
+        let (pool_part, sl8_part) = {
+            let pool = (amount as u128 * cfg.fee_split_bps as u128 / 10_000) as u64;
+            (pool, amount - pool)
+        };
+        let after = e.token_snapshot();
+        let trader_ta = e.wallet_ta(&w, Coin::Usdc);
+        assert_eq!(snap[&trader_ta] - after[&trader_ta], amount, "step {step}: trader pays exactly the phase price");
+        assert_eq!(after[&e.usdc_pool] - snap[&e.usdc_pool], pool_part, "step {step}: pool share");
+        assert_eq!(after[&e.sl8_usdc] - snap[&e.sl8_usdc], sl8_part, "step {step}: SL8 share");
+        let total = |m: &std::collections::BTreeMap<Pubkey, u64>, mint: &Pubkey| -> u128 {
+            m.iter().filter(|(a, _)| e.token_state(a).mint == *mint).map(|(_, v)| *v as u128).sum()
+        };
+        for mint in [e.usdc, e.usdt] {
+            assert_eq!(total(&snap, &mint), total(&after, &mint), "step {step}: tokens conserved for {mint}");
+        }
 
         let fresh = e.trader(&s, &w, new);
         assert_eq!(fresh.status, TraderStatus::Active, "step {step}");

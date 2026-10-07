@@ -8,8 +8,10 @@ use core_vault::state::TraderState;
 use solana_signer::Signer;
 
 fn setup() -> (Env, Sector, Pubkey) {
-    let (e, s) = Env::registered(&Cfg::default());
-    (e, s, wallet())
+    let (mut e, s) = Env::registered(&Cfg::default());
+    let w = wallet();
+    e.fund_wallet(&w);
+    (e, s, w)
 }
 
 #[test]
@@ -57,7 +59,6 @@ fn every_registered_tier_is_purchasable() {
 #[test]
 fn rejects_unregistered_tier_combinations() {
     let (mut e, s, w) = setup();
-    let payer = e.payer.pubkey();
     // (size, amount) pairs that are NOT an exact registered tier
     let bad = [
         (TIER_A.0, TIER_A.1 + 1),   // right size, wrong price
@@ -70,7 +71,7 @@ fn rejects_unregistered_tier_combinations() {
     ];
     for (i, (size, amount)) in bad.into_iter().enumerate() {
         let id = 100 + i as u64;
-        let r = e.send(deposit_fee_ix(&s, &w, id, amount, size, &payer));
+        let r = e.send(deposit_fee_ix(&e, &s, &w, id, amount, size));
         assert_vault_err(&r, VaultError::InvalidChallengeTier);
         assert!(e.trader_opt(&s, &w, id).is_none(), "failed purchase must not create a record");
     }
@@ -84,7 +85,7 @@ fn duplicate_challenge_id_is_rejected_and_original_is_untouched() {
     let before = e.svm.get_account(&s.trader(&w, 1)).unwrap().data;
 
     // even a *different* tier under the same id must not overwrite it
-    let r = e.send(deposit_fee_ix(&s, &w, 1, TIER_B.1, TIER_B.0, &e.payer.pubkey()));
+    let r = e.send(deposit_fee_ix(&e, &s, &w, 1, TIER_B.1, TIER_B.0));
     assert_already_in_use(&r);
     assert_eq!(e.svm.get_account(&s.trader(&w, 1)).unwrap().data, before);
 }
@@ -105,7 +106,7 @@ fn same_id_for_different_wallets_and_different_ids_for_one_wallet_are_independen
 fn rejected_while_product_is_paused() {
     let (mut e, s, w) = setup();
     e.pause(&s);
-    let r = e.send(deposit_fee_ix(&s, &w, 1, TIER_A.1, TIER_A.0, &e.payer.pubkey()));
+    let r = e.send(deposit_fee_ix(&e, &s, &w, 1, TIER_A.1, TIER_A.0));
     assert_vault_err(&r, VaultError::ProductNotActive);
     assert!(e.trader_opt(&s, &w, 1).is_none());
     // and works again after reactivation
@@ -116,7 +117,7 @@ fn rejected_while_product_is_paused() {
 #[test]
 fn rejects_a_stranger_as_sector_authority() {
     let (mut e, s, w) = setup();
-    let mut ix = deposit_fee_ix(&s, &w, 1, TIER_A.1, TIER_A.0, &e.payer.pubkey());
+    let mut ix = deposit_fee_ix(&e, &s, &w, 1, TIER_A.1, TIER_A.0);
     ix.accounts[0].pubkey = Pubkey::new_unique();
     let r = e.send(ix);
     assert_vault_err(&r, VaultError::Unauthorized);
@@ -129,7 +130,7 @@ fn rejects_another_sectors_valid_authority_against_this_registry() {
     let (mut e, a, w) = setup();
     let b = Sector::new();
     e.register(&b, &Cfg::default());
-    let mut ix = deposit_fee_ix(&a, &w, 1, TIER_A.1, TIER_A.0, &e.payer.pubkey());
+    let mut ix = deposit_fee_ix(&e, &a, &w, 1, TIER_A.1, TIER_A.0);
     ix.accounts[0].pubkey = b.authority;
     let r = e.send(ix);
     assert_vault_err(&r, VaultError::Unauthorized);
@@ -138,7 +139,7 @@ fn rejects_another_sectors_valid_authority_against_this_registry() {
 #[test]
 fn rejects_the_right_authority_when_it_is_not_a_signer() {
     let (mut e, s, w) = setup();
-    let mut ix = deposit_fee_ix(&s, &w, 1, TIER_A.1, TIER_A.0, &e.payer.pubkey());
+    let mut ix = deposit_fee_ix(&e, &s, &w, 1, TIER_A.1, TIER_A.0);
     ix.accounts[0].is_signer = false;
     let r = e.send(ix);
     assert_anchor_err(&r, ErrorCode::AccountNotSigner);
@@ -148,6 +149,8 @@ fn rejects_the_right_authority_when_it_is_not_a_signer() {
 fn rejects_an_unregistered_product() {
     let mut e = Env::new();
     let ghost = Sector::new();
-    let r = e.send(deposit_fee_ix(&ghost, &wallet(), 1, TIER_A.1, TIER_A.0, &e.payer.pubkey()));
+    let w = wallet();
+    e.fund_wallet(&w);
+    let r = e.send(deposit_fee_ix(&e, &ghost, &w, 1, TIER_A.1, TIER_A.0));
     assert_anchor_err(&r, ErrorCode::AccountNotInitialized);
 }

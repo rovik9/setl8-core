@@ -85,4 +85,16 @@ pub enum VaultError {
 
     #[msg("account is not owned by the classic SPL Token program")]
     WrongTokenProgram,
+
+    #[msg("token account has the wrong owner or mint for this payment")]
+    InvalidTokenAccount,
+
+    #[msg("trader must be the same wallet as the trader_wallet argument")]
+    TraderWalletMismatch,
+
+    #[msg("trader's token account does not hold enough to pay this amount")]
+    InsufficientTokenBalance,
+
+    #[msg("the product's fee_split_bps is above 10_000")]
+    InvalidFeeSplit,
 }

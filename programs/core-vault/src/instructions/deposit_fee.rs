@@ -1,9 +1,12 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{Mint, Token, TokenAccount};
 
-use crate::constants::{PRODUCT_REGISTRY_SEED, TRADER_STATE_SEED};
+use crate::constants::{
+    PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED, VAULT_STATE_SEED,
+};
 use crate::errors::VaultError;
-use crate::instructions::assert_sector_authority;
-use crate::state::{ProductRegistry, TraderState, TraderStatus};
+use crate::instructions::{assert_sector_authority, plan_payment, Payment};
+use crate::state::{ProductRegistry, TraderState, TraderStatus, VaultState};
 
 #[derive(Accounts)]
 #[instruction(amount: u64, product_program_id: Pubkey, challenge_id: u64, trader_wallet: Pubkey)]
@@ -17,7 +20,7 @@ pub struct DepositFee<'info> {
         seeds = [PRODUCT_REGISTRY_SEED, product_program_id.as_ref()],
         bump = product_registry.bump,
     )]
-    pub product_registry: Account<'info, ProductRegistry>,
+    pub product_registry: Box<Account<'info, ProductRegistry>>,
 
     /// The new challenge's record. `init` rejects a reused `challenge_id`.
     #[account(
@@ -32,7 +35,7 @@ pub struct DepositFee<'info> {
         ],
         bump,
     )]
-    pub trader_state: Account<'info, TraderState>,
+    pub trader_state: Box<Account<'info, TraderState>>,
 
     /// Pays rent for `trader_state`. The sector authority PDA holds no
     /// lamports, so the sector passes a funded signer here.
@@ -40,15 +43,60 @@ pub struct DepositFee<'info> {
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+
+    // ---- token movement (appended; everything above keeps its position) ----
+    #[account(
+        seeds = [VAULT_STATE_SEED, SL8_ADMIN_PUBKEY.as_ref(), ROV_ADMIN_PUBKEY.as_ref()],
+        bump = vault_state.bump,
+    )]
+    pub vault_state: Box<Account<'info, VaultState>>,
+
+    /// The paying trader. Must sign and must be the `trader_wallet` argument.
+    #[account(address = trader_wallet @ VaultError::TraderWalletMismatch)]
+    pub trader: Signer<'info>,
+
+    /// The trader's own token account for `mint` (source of the payment).
+    #[account(
+        mut,
+        constraint = trader_token_account.owner == trader.key() && trader_token_account.mint == mint.key()
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub trader_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// The stablecoin being paid: exactly one of the vault's two mints.
+    #[account(
+        constraint = mint.key() == vault_state.usdc_mint || mint.key() == vault_state.usdt_mint
+            @ VaultError::InvalidMint,
+    )]
+    pub mint: Box<Account<'info, Mint>>,
+
+    /// The vault's payout pool for `mint`.
+    #[account(
+        mut,
+        constraint = Some(pool_token_account.key()) == vault_state.pool_for(&mint.key())
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// SL8's destination: any `mint` token account owned by `vault_state.sl8_wallet`.
+    #[account(
+        mut,
+        constraint = sl8_token_account.owner == vault_state.sl8_wallet && sl8_token_account.mint == mint.key()
+            @ VaultError::InvalidTokenAccount,
+    )]
+    pub sl8_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// Classic SPL Token only: Token-2022 fails the program-id check.
+    pub token_program: Program<'info, Token>,
 }
 
 /// Creates the `TraderState` for a new challenge purchase. The fee transfer
 /// itself is the proof of purchase, so there is no separate confirmation call.
 ///
-/// NOT YET DONE (needs the dual-mint VaultState from the next module): the
-/// actual token movement and the 35%/65% split. Everything that decides who
-/// may buy what -- tier validation, challenge-id uniqueness, per-wallet
-/// keying -- is enforced here.
+/// Also takes the payment: `amount` base units of USDC or USDT move from the
+/// trader's own token account, `floor(amount * fee_split_bps / 10_000)` to the
+/// payout pool and the exact remainder to the SL8 wallet. The trader must sign.
+/// All validation and state writes happen before the two token CPIs.
 pub fn deposit_fee(
     ctx: Context<DepositFee>,
     amount: u64,
@@ -70,6 +118,9 @@ pub fn deposit_fee(
         VaultError::InvalidChallengeTier
     );
 
+    let (pool_amount, sl8_amount) =
+        plan_payment(amount, registry.fee_split_bps, &ctx.accounts.trader_token_account)?;
+
     let now = Clock::get()?.unix_timestamp;
     let paused_now = registry.paused_secs_at(now);
 
@@ -85,7 +136,13 @@ pub fn deposit_fee(
     ts.reset_used = false;
     ts.bump = ctx.bumps.trader_state;
 
-    // TODO Module 2b: move `amount` into the vault's payout pool per
-    // fee_split_bps (dual USDC/USDT pools).
-    Ok(())
+    Payment {
+        trader: &ctx.accounts.trader,
+        trader_token_account: &ctx.accounts.trader_token_account,
+        mint: &ctx.accounts.mint,
+        pool_token_account: &ctx.accounts.pool_token_account,
+        sl8_token_account: &ctx.accounts.sl8_token_account,
+        token_program: &ctx.accounts.token_program,
+    }
+    .execute(pool_amount, sl8_amount)
 }

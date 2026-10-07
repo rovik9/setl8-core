@@ -8,6 +8,7 @@ mod record_activity;
 mod reactivate_product;
 mod register_product;
 mod request_payout;
+mod token_payment;
 mod update_product_config;
 
 pub use deposit_fee::*;
@@ -20,6 +21,7 @@ pub use record_activity::*;
 pub use reactivate_product::*;
 pub use register_product::*;
 pub use request_payout::*;
+pub use token_payment::*;
 pub use update_product_config::*;
 
 use anchor_lang::prelude::*;

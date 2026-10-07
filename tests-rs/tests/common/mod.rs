@@ -6,6 +6,7 @@
 //! state).
 #![allow(dead_code, unused_imports)]
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anchor_lang::solana_program::{
@@ -143,7 +144,27 @@ pub struct Env {
     /// SL8-side destination token accounts (owner = SL8_ADMIN_PUBKEY).
     pub sl8_usdc: Pubkey,
     pub sl8_usdt: Pubkey,
+    /// Token accounts created for trader wallets (lazily, see `fund_wallet`).
+    pub wallets: HashMap<Pubkey, WalletTok>,
+    /// Every token account this env created or knows about, for balance snapshots.
+    pub tracked: Vec<Pubkey>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coin {
+    Usdc,
+    Usdt,
+}
+
+/// A trader wallet's own token accounts (owner = the wallet).
+#[derive(Clone, Copy, Debug)]
+pub struct WalletTok {
+    pub usdc: Pubkey,
+    pub usdt: Pubkey,
+}
+
+/// Starting balance of each of a funded wallet's token accounts (1,000,000 coins).
+pub const WALLET_START: u64 = 1_000_000_000_000;
 
 pub fn vault_pda() -> Pubkey {
     Pubkey::find_program_address(
@@ -212,7 +233,10 @@ impl Env {
             usdt_pool: pool_pda(&vault, &usdt),
             sl8_usdc: Pubkey::default(),
             sl8_usdt: Pubkey::default(),
+            wallets: HashMap::new(),
+            tracked: vec![],
         };
+        env.tracked.extend([env.usdc_pool, env.usdt_pool]);
         for k in [env.sl8.pubkey(), env.rov.pubkey(), env.payer.pubkey()] {
             env.fund(&k);
         }
@@ -274,7 +298,78 @@ impl Env {
     pub fn new_token_account(&mut self, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Pubkey {
         let addr = Pubkey::new_unique();
         self.set_token_account(&addr, mint, owner, amount);
+        self.tracked.push(addr);
         addr
+    }
+
+    /// (mint, pool, sl8 destination) for a coin.
+    pub fn coin(&self, c: Coin) -> (Pubkey, Pubkey, Pubkey) {
+        match c {
+            Coin::Usdc => (self.usdc, self.usdc_pool, self.sl8_usdc),
+            Coin::Usdt => (self.usdt, self.usdt_pool, self.sl8_usdt),
+        }
+    }
+
+    /// Idempotent: gives `w` a USDC and a USDT token account holding
+    /// `WALLET_START` each.
+    pub fn fund_wallet(&mut self, w: &Pubkey) -> WalletTok {
+        if let Some(t) = self.wallets.get(w) {
+            return *t;
+        }
+        let (usdc, usdt) = (self.usdc, self.usdt);
+        let t = WalletTok {
+            usdc: self.new_token_account(&usdc, w, WALLET_START),
+            usdt: self.new_token_account(&usdt, w, WALLET_START),
+        };
+        self.wallets.insert(*w, t);
+        t
+    }
+    /// Like `fund_wallet` but with exact starting balances.
+    pub fn fund_wallet_with(&mut self, w: &Pubkey, usdc_amount: u64, usdt_amount: u64) -> WalletTok {
+        let t = self.fund_wallet(w);
+        let (usdc, usdt) = (self.usdc, self.usdt);
+        self.set_token_account(&t.usdc, &usdc, w, usdc_amount);
+        self.set_token_account(&t.usdt, &usdt, w, usdt_amount);
+        t
+    }
+    pub fn wallet_tok(&self, w: &Pubkey) -> WalletTok {
+        *self.wallets.get(w).unwrap_or_else(|| panic!("wallet {w} has no token accounts: call fund_wallet first"))
+    }
+    pub fn wallet_ta(&self, w: &Pubkey, c: Coin) -> Pubkey {
+        let t = self.wallet_tok(w);
+        match c {
+            Coin::Usdc => t.usdc,
+            Coin::Usdt => t.usdt,
+        }
+    }
+
+    /// Balance of every tracked token account that currently exists.
+    pub fn token_snapshot(&self) -> BTreeMap<Pubkey, u64> {
+        let mut m = BTreeMap::new();
+        for a in self.tracked.iter().chain([&self.sl8_usdc, &self.sl8_usdt]) {
+            if let Some(acct) = self.svm.get_account(a) {
+                if acct.owner == spl_token::ID && acct.data.len() == SplAccount::LEN {
+                    m.insert(*a, SplAccount::unpack(&acct.data).unwrap().amount);
+                }
+            }
+        }
+        m
+    }
+    /// Sum of all tracked balances for `mint` (conservation checks).
+    pub fn total_of(&self, mint: &Pubkey) -> u128 {
+        self.token_snapshot()
+            .keys()
+            .filter(|a| self.token_state(a).mint == *mint)
+            .map(|a| self.token_state(a).amount as u128)
+            .sum()
+    }
+    /// Edit a token account's state in place (e.g. freeze it).
+    pub fn edit_token_account(&mut self, addr: &Pubkey, f: impl FnOnce(&mut SplAccount)) {
+        let mut st = self.token_state(addr);
+        f(&mut st);
+        let mut data = vec![0u8; SplAccount::LEN];
+        SplAccount::pack(st, &mut data).unwrap();
+        self.set_raw(addr, data, spl_token::ID);
     }
     pub fn token_state(&self, addr: &Pubkey) -> SplAccount {
         let a = self.svm.get_account(addr).expect("token account");
@@ -355,8 +450,12 @@ impl Env {
     pub fn deposit(&mut self, s: &Sector, w: &Pubkey, id: u64) -> TransactionMetadata {
         self.deposit_tier(s, w, id, TIER_A)
     }
-    pub fn deposit_tier(&mut self, s: &Sector, w: &Pubkey, id: u64, (size, cost): (u64, u64)) -> TransactionMetadata {
-        let ix = deposit_fee_ix(s, w, id, cost, size, &self.payer.pubkey());
+    pub fn deposit_tier(&mut self, s: &Sector, w: &Pubkey, id: u64, tier: (u64, u64)) -> TransactionMetadata {
+        self.deposit_coin(s, w, id, tier, Coin::Usdc)
+    }
+    pub fn deposit_coin(&mut self, s: &Sector, w: &Pubkey, id: u64, (size, cost): (u64, u64), c: Coin) -> TransactionMetadata {
+        self.fund_wallet(w);
+        let ix = deposit_fee_ix_coin(self, s, w, id, cost, size, c);
         self.ok(ix)
     }
     pub fn record(&mut self, s: &Sector, w: &Pubkey, id: u64) -> TransactionMetadata {
@@ -491,12 +590,56 @@ pub fn reactivate_ix(e: &Env, s: &Sector) -> Instruction {
     )
 }
 
-pub fn deposit_fee_ix(s: &Sector, w: &Pubkey, id: u64, amount: u64, size: u64, payer: &Pubkey) -> Instruction {
+/// Where the appended token-movement accounts sit in each instruction's
+/// account list (for tests that corrupt one of them).
+#[derive(Clone, Copy)]
+pub struct Slots {
+    pub vault: usize,
+    pub trader: usize,
+    pub trader_ta: usize,
+    pub mint: usize,
+    pub pool: usize,
+    pub sl8_ta: usize,
+    pub token_program: usize,
+}
+/// deposit_fee: 0 auth, 1 registry, 2 trader_state, 3 payer, 4 system, then these.
+pub const DF: Slots = Slots { vault: 5, trader: 6, trader_ta: 7, mint: 8, pool: 9, sl8_ta: 10, token_program: 11 };
+/// deposit_reset: 0 auth, 1 registry, 2 prev, 3 new, 4 payer, 5 system, then these.
+pub const DR: Slots = Slots { vault: 6, trader: 7, trader_ta: 8, mint: 9, pool: 10, sl8_ta: 11, token_program: 12 };
+
+/// The seven appended accounts, in order: vault_state, trader (signer),
+/// trader_token_account, mint, pool_token_account, sl8_token_account,
+/// token_program.
+fn token_metas(e: &Env, w: &Pubkey, c: Coin) -> [AccountMeta; 7] {
+    let (mint, pool, sl8) = e.coin(c);
+    [
+        AccountMeta::new_readonly(e.vault, false),
+        AccountMeta::new_readonly(*w, true),
+        AccountMeta::new(e.wallet_ta(w, c), false),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new(pool, false),
+        AccountMeta::new(sl8, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ]
+}
+
+/// USDC deposit_fee. The wallet must already have token accounts (`fund_wallet`).
+pub fn deposit_fee_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, size: u64) -> Instruction {
+    deposit_fee_ix_coin(e, s, w, id, amount, size, Coin::Usdc)
+}
+
+pub fn deposit_fee_ix_coin(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, size: u64, c: Coin) -> Instruction {
+    let mut remaining = vec![
+        AccountMeta::new(s.trader(w, id), false),
+        AccountMeta::new(e.payer.pubkey(), true),
+        sys(),
+    ];
+    remaining.extend(token_metas(e, w, c));
     si::deposit_fee(
         core_vault::ID,
         s.authority,
         s.registry(),
-        &[AccountMeta::new(s.trader(w, id), false), AccountMeta::new(*payer, true), sys()],
+        &remaining,
         si::DepositFeeArgs {
             amount,
             product_program_id: s.id,
@@ -507,26 +650,34 @@ pub fn deposit_fee_ix(s: &Sector, w: &Pubkey, id: u64, amount: u64, size: u64, p
     )
 }
 
+/// USDC deposit_reset. The wallet must already have token accounts.
+pub fn reset_ix(e: &Env, s: &Sector, w: &Pubkey, prev: u64, new: u64, amount: u64, phase: u8) -> Instruction {
+    reset_ix_coin(e, s, w, prev, new, amount, phase, Coin::Usdc)
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn reset_ix(
+pub fn reset_ix_coin(
+    e: &Env,
     s: &Sector,
     w: &Pubkey,
     prev: u64,
     new: u64,
     amount: u64,
     phase: u8,
-    payer: &Pubkey,
+    c: Coin,
 ) -> Instruction {
+    let mut remaining = vec![
+        AccountMeta::new(s.trader(w, prev), false),
+        AccountMeta::new(s.trader(w, new), false),
+        AccountMeta::new(e.payer.pubkey(), true),
+        sys(),
+    ];
+    remaining.extend(token_metas(e, w, c));
     si::deposit_reset(
         core_vault::ID,
         s.authority,
         s.registry(),
-        &[
-            AccountMeta::new(s.trader(w, prev), false),
-            AccountMeta::new(s.trader(w, new), false),
-            AccountMeta::new(*payer, true),
-            sys(),
-        ],
+        &remaining,
         si::DepositResetArgs {
             amount,
             trader_wallet: *w,
@@ -661,4 +812,9 @@ pub fn assert_payout_outcome(m: &TransactionMetadata, o: PayoutOutcome) {
 /// A fresh wallet.
 pub fn wallet() -> Pubkey {
     Pubkey::new_unique()
+}
+
+/// No token account moved and no TraderState-like account appeared/changed.
+pub fn assert_snapshot_unchanged(before: &BTreeMap<Pubkey, u64>, after: &BTreeMap<Pubkey, u64>) {
+    assert_eq!(before, after, "a rejected payment must not move any token balance");
 }
