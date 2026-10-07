@@ -1,0 +1,20 @@
+[package]
+name = "tests-rs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Dev-only LiteSVM integration tests for core-vault. Not an Anchor program."
+
+# Standalone workspace: keeps litesvm out of the vault's Cargo.lock.
+[workspace]
+
+[dev-dependencies]
+core-vault = { path = "../programs/core-vault", features = ["no-entrypoint"] }
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.0" }
+anchor-lang = "0.32.1"
+litesvm = "=0.7.0"
+solana-keypair = "2"
+solana-signer = "2"
+solana-transaction = "2"
+solana-message = "2"
+solana-transaction-error = "2"

@@ -1,5 +1,8 @@
 [workspace]
 members = ["programs/*"]
+# tests-rs is its own workspace (own Cargo.lock/target) so litesvm's dependency
+# tree never touches the vault's lockfile.
+exclude = ["tests-rs"]
 resolver = "2"
 
 [profile.release]
