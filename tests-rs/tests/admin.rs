@@ -368,3 +368,36 @@ fn signer_keys_in_tests_are_the_configured_admin_keys() {
     assert_eq!(e.sl8.pubkey(), core_vault::constants::SL8_ADMIN_PUBKEY);
     assert_eq!(e.rov.pubkey(), core_vault::constants::ROV_ADMIN_PUBKEY);
 }
+
+// ------------------------------------------------------------- fee_split_bps
+
+#[test]
+fn register_rejects_fee_split_above_10000_and_accepts_the_edges() {
+    let mut e = Env::new();
+    for bad in [10_001u16, 20_000, u16::MAX] {
+        let s = Sector::new();
+        let r = e.send(register_ix(&e, &s, &Cfg { fee_split_bps: bad, ..Cfg::default() }));
+        assert_vault_err(&r, VaultError::InvalidFeeSplit);
+        assert!(e.svm.get_account(&s.registry()).is_none(), "nothing may be registered ({bad})");
+    }
+    for ok in [0u16, 1, 6500, 9_999, 10_000] {
+        let s = Sector::new();
+        e.register(&s, &Cfg { fee_split_bps: ok, ..Cfg::default() });
+        assert_eq!(e.registry(&s).fee_split_bps, ok);
+    }
+}
+
+#[test]
+fn update_rejects_fee_split_above_10000_and_accepts_the_edges() {
+    let (mut e, s) = Env::registered(&Cfg::default());
+    let before = e.svm.get_account(&s.registry()).unwrap().data;
+    for bad in [10_001u16, 20_000, u16::MAX] {
+        let r = e.send(update_ix(&e, &s, &Cfg { fee_split_bps: bad, max_payout: 99, ..Cfg::default() }));
+        assert_vault_err(&r, VaultError::InvalidFeeSplit);
+        assert_eq!(e.svm.get_account(&s.registry()).unwrap().data, before, "a rejected update writes nothing ({bad})");
+    }
+    for ok in [0u16, 1, 9_999, 10_000, 6500] {
+        e.update(&s, &Cfg { fee_split_bps: ok, ..Cfg::default() });
+        assert_eq!(e.registry(&s).fee_split_bps, ok);
+    }
+}

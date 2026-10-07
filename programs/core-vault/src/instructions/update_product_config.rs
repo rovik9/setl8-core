@@ -2,7 +2,8 @@ use anchor_lang::prelude::*;
 use setl8_shared_interfaces::ChallengeSize;
 
 use crate::constants::{
-    MAX_CHALLENGE_SIZES, MAX_RESET_PHASES, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY,
+    BPS_DENOMINATOR, MAX_CHALLENGE_SIZES, MAX_RESET_PHASES, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY,
+    SL8_ADMIN_PUBKEY,
 };
 use crate::errors::VaultError;
 use crate::state::ProductRegistry;
@@ -37,6 +38,9 @@ pub fn update_product_config(
         VaultError::TooManyChallengeSizes
     );
     require!(reset_price_bps.len() <= MAX_RESET_PHASES, VaultError::TooManyResetPhases);
+    // The pool's share of a payment can't exceed the payment. (Also guarded at
+    // payment time as defense in depth.)
+    require!(fee_split_bps as u128 <= BPS_DENOMINATOR, VaultError::InvalidFeeSplit);
 
     let registry = &mut ctx.accounts.product_registry;
     registry.challenge_sizes = challenge_sizes;

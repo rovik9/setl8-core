@@ -48,12 +48,20 @@ impl Rig {
             max_payout: 5,
             reset_bps: vec![100, PHASE_BPS as u16, 450],
         };
+        // register_product now refuses fee_split_bps above 10_000, so a bad
+        // value is written straight into the registry account AFTER setup
+        // (the payment-time guard is what these states exercise).
+        let cfg = Cfg { fee_split_bps: split_bps.min(10_000), ..cfg };
         let (mut e, s) = Env::registered(&cfg);
         let w = wallet();
         e.fund_wallet(&w);
         if kind == Kind::Reset {
             e.deposit_tier(&s, &w, 1, (size, 1));
             e.flag(&s, &w, 1);
+        }
+        if split_bps > 10_000 {
+            e.set_registry(&s, |r| r.fee_split_bps = split_bps);
+            assert_eq!(e.registry(&s).fee_split_bps, split_bps);
         }
         Rig { e, s, w, kind, size, amount, bps: split_bps }
     }

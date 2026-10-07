@@ -498,6 +498,20 @@ impl Env {
         assert_eq!(a.owner, core_vault::ID);
         core_vault::state::VaultState::try_deserialize(&mut a.data.as_slice()).unwrap()
     }
+    /// Rewrites the registry account's data directly (bypassing the program's
+    /// own validation), to build states the instructions would refuse to create.
+    pub fn set_registry(&mut self, s: &Sector, f: impl FnOnce(&mut ProductRegistry)) {
+        let mut reg = self.registry(s);
+        f(&mut reg);
+        let old = self.svm.get_account(&s.registry()).unwrap();
+        let mut data = Vec::with_capacity(old.data.len());
+        anchor_lang::AccountSerialize::try_serialize(&reg, &mut data).unwrap();
+        assert!(data.len() <= old.data.len());
+        data.resize(old.data.len(), 0);
+        self.svm
+            .set_account(s.registry(), RawAccount { data, ..old })
+            .unwrap();
+    }
     pub fn registry(&self, s: &Sector) -> ProductRegistry {
         let a = self.svm.get_account(&s.registry()).expect("registry account");
         assert_eq!(a.owner, core_vault::ID);
