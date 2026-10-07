@@ -27,6 +27,8 @@ pub struct ReactivateProduct<'info> {
 /// decision, not a fresh start — heartbeat reconciliation (Module 3+) picks
 /// back up against whatever counts were already there.
 pub fn reactivate_product(ctx: Context<ReactivateProduct>, _product_program_id: Pubkey) -> Result<()> {
-    ctx.accounts.product_registry.active = true;
+    // `resume` also banks the time spent paused so trader inactivity clocks
+    // skip it.
+    ctx.accounts.product_registry.resume(Clock::get()?.unix_timestamp);
     Ok(())
 }

@@ -1,7 +1,9 @@
 use anchor_lang::prelude::*;
 use setl8_shared_interfaces::ChallengeSize;
 
-use crate::constants::{MAX_CHALLENGE_SIZES, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY};
+use crate::constants::{
+    MAX_CHALLENGE_SIZES, MAX_RESET_PHASES, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY,
+};
 use crate::errors::VaultError;
 use crate::state::ProductRegistry;
 
@@ -28,15 +30,18 @@ pub fn update_product_config(
     challenge_sizes: Vec<ChallengeSize>,
     fee_split_bps: u16,
     max_payout_count: u64,
+    reset_price_bps: Vec<u16>,
 ) -> Result<()> {
     require!(
         challenge_sizes.len() <= MAX_CHALLENGE_SIZES,
         VaultError::TooManyChallengeSizes
     );
+    require!(reset_price_bps.len() <= MAX_RESET_PHASES, VaultError::TooManyResetPhases);
 
     let registry = &mut ctx.accounts.product_registry;
     registry.challenge_sizes = challenge_sizes;
     registry.fee_split_bps = fee_split_bps;
     registry.max_payout_count = max_payout_count;
+    registry.reset_price_bps = reset_price_bps;
     Ok(())
 }

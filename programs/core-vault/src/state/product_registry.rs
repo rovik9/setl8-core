@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use setl8_shared_interfaces::ChallengeSize;
 
-use crate::constants::{CHALLENGE_SIZE_SPACE, MAX_CHALLENGE_SIZES};
+use crate::constants::{CHALLENGE_SIZE_SPACE, MAX_CHALLENGE_SIZES, MAX_RESET_PHASES, PAUSE_NONE};
 
 /// One per registered sector program (lev-trading, options, ...). Extends
 /// the Module 1 scope only as far as registration/config; trader-state and
@@ -24,6 +24,16 @@ pub struct ProductRegistry {
     /// Running count for heartbeat reconciliation (Module 3+); untouched by
     /// Module 1.
     pub total_requests_emitted: u64,
+    /// Phase-reset prices in basis points of account size, indexed by the
+    /// 0-based phase a trader failed in. Empty = no phase resets offered.
+    pub reset_price_bps: Vec<u16>,
+    /// Why the product is paused (`PAUSE_*`), `PAUSE_NONE` when active.
+    pub pause_reason: u8,
+    /// Unix time the current pause began; 0 when not paused.
+    pub paused_since: i64,
+    /// Total seconds spent paused in completed pauses. Together with
+    /// `paused_since` this lets the inactivity clock freeze during pauses.
+    pub total_paused_secs: i64,
     /// Canonical PDA bump for `[PRODUCT_REGISTRY_SEED,
     /// product_program_id.as_ref()]`, stored so later instructions can pass
     /// `bump = product_registry.bump` instead of re-deriving.
@@ -41,5 +51,33 @@ impl ProductRegistry {
         + 8 // max_payout_count
         + 1 // active
         + 8 // total_requests_emitted
+        + 4 + (MAX_RESET_PHASES * 2) // reset_price_bps
+        + 1 // pause_reason
+        + 8 // paused_since
+        + 8 // total_paused_secs
         + 1; // bump
+
+    /// Total seconds this product has spent paused as of `now`, including a
+    /// pause still in progress.
+    pub fn paused_secs_at(&self, now: i64) -> i64 {
+        let ongoing = if self.paused_since > 0 { (now - self.paused_since).max(0) } else { 0 };
+        self.total_paused_secs.saturating_add(ongoing)
+    }
+
+    /// Marks the product paused for `reason`. Caller checks it is active.
+    pub fn pause(&mut self, reason: u8, now: i64) {
+        self.active = false;
+        self.pause_reason = reason;
+        self.paused_since = now;
+    }
+
+    /// Ends a pause, banking the paused time so inactivity clocks skip it.
+    pub fn resume(&mut self, now: i64) {
+        if self.paused_since > 0 {
+            self.total_paused_secs = self.total_paused_secs.saturating_add((now - self.paused_since).max(0));
+        }
+        self.paused_since = 0;
+        self.pause_reason = PAUSE_NONE;
+        self.active = true;
+    }
 }

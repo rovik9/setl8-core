@@ -52,6 +52,10 @@ function vecLenLE(n: number): Buffer {
   return b;
 }
 
+function encodeU16Vec(values: number[]): Buffer {
+  return Buffer.concat([vecLenLE(values.length), ...values.map((v) => u16LE(v))]);
+}
+
 function encodeChallengeSizes(sizes: ChallengeSize[]): Buffer {
   return Buffer.concat([
     vecLenLE(sizes.length),
@@ -88,7 +92,8 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     feeSplitBps: number,
     challengeSizes: ChallengeSize[],
     maxPayoutCount: number,
-    productRegistry: PublicKey
+    productRegistry: PublicKey,
+    resetPriceBps: number[] = []
   ): TransactionInstruction {
     const data = Buffer.concat([
       disc("register_product"),
@@ -96,6 +101,7 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
       u16LE(feeSplitBps),
       encodeChallengeSizes(challengeSizes),
       u64LE(maxPayoutCount),
+      encodeU16Vec(resetPriceBps),
     ]);
     return new TransactionInstruction({
       programId,
@@ -122,12 +128,26 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     });
   }
 
+  function pauseProductIx(productProgramId: PublicKey, productRegistry: PublicKey): TransactionInstruction {
+    const data = Buffer.concat([disc("pause_product"), productProgramId.toBuffer()]);
+    return new TransactionInstruction({
+      programId,
+      keys: [
+        { pubkey: sl8Admin.publicKey, isSigner: true, isWritable: false },
+        { pubkey: rovAdmin.publicKey, isSigner: true, isWritable: false },
+        { pubkey: productRegistry, isSigner: false, isWritable: true },
+      ],
+      data,
+    });
+  }
+
   function updateProductConfigIx(
     productProgramId: PublicKey,
     challengeSizes: ChallengeSize[],
     feeSplitBps: number,
     maxPayoutCount: number,
-    productRegistry: PublicKey
+    productRegistry: PublicKey,
+    resetPriceBps: number[] = []
   ): TransactionInstruction {
     const data = Buffer.concat([
       disc("update_product_config"),
@@ -135,6 +155,7 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
       encodeChallengeSizes(challengeSizes),
       u16LE(feeSplitBps),
       u64LE(maxPayoutCount),
+      encodeU16Vec(resetPriceBps),
     ]);
     return new TransactionInstruction({
       programId,
@@ -169,8 +190,33 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     offset += 1;
     const totalRequestsEmitted = data.readBigUInt64LE(offset);
     offset += 8;
+    const resetLen = data.readUInt32LE(offset);
+    offset += 4;
+    const resetPriceBps: number[] = [];
+    for (let i = 0; i < resetLen; i++) {
+      resetPriceBps.push(data.readUInt16LE(offset));
+      offset += 2;
+    }
+    const pauseReason = data.readUInt8(offset);
+    offset += 1;
+    const pausedSince = data.readBigInt64LE(offset);
+    offset += 8;
+    const totalPausedSecs = data.readBigInt64LE(offset);
+    offset += 8;
     const bump = data.readUInt8(offset);
-    return { productProgramId, challengeSizes, feeSplitBps, maxPayoutCount, active, totalRequestsEmitted, bump };
+    return {
+      productProgramId,
+      challengeSizes,
+      feeSplitBps,
+      maxPayoutCount,
+      active,
+      totalRequestsEmitted,
+      resetPriceBps,
+      pauseReason,
+      pausedSince,
+      totalPausedSecs,
+      bump,
+    };
   }
 
   async function send(ix: TransactionInstruction, signers: Keypair[]) {
@@ -194,6 +240,10 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     assert.deepEqual([...disc("deposit_fee")], [11, 51, 105, 140, 198, 229, 7, 77]);
     assert.deepEqual([...disc("request_payout")], [5, 176, 110, 197, 172, 177, 64, 200]);
     assert.deepEqual([...disc("flag_trader_failed")], [60, 230, 114, 103, 27, 235, 37, 129]);
+    assert.deepEqual([...disc("record_activity")], [199, 86, 104, 65, 200, 211, 71, 50]);
+    assert.deepEqual([...disc("mark_abandoned")], [2, 20, 252, 203, 247, 72, 6, 175]);
+    assert.deepEqual([...disc("deposit_reset")], [25, 27, 129, 85, 180, 120, 189, 155]);
+    assert.deepEqual([...disc("pause_product")], [146, 44, 126, 129, 251, 223, 185, 185]);
   });
 
   it("registers a product and inits the ProductRegistry PDA correctly", async () => {
@@ -202,7 +252,7 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     const challengeSizes: ChallengeSize[] = [{ size: 10_000, cost: 100 }];
 
     await send(
-      registerProductIx(fakeSectorProgramId, 6500, challengeSizes, 5, productRegistry),
+      registerProductIx(fakeSectorProgramId, 6500, challengeSizes, 5, productRegistry, [100, 150, 450]),
       [sl8Admin, rovAdmin]
     );
 
@@ -215,6 +265,9 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     assert.isTrue(registry.active);
     assert.equal(registry.totalRequestsEmitted, 0n);
     assert.equal(registry.challengeSizes.length, 1);
+    assert.deepEqual(registry.resetPriceBps, [100, 150, 450]);
+    assert.equal(registry.pauseReason, 0);
+    assert.equal(registry.pausedSince, 0n);
   });
 
   it("rejects register_product when one of the two required admin signers is missing", async () => {
@@ -251,18 +304,46 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     assert.equal(registry.challengeSizes[0].cost, 500n);
   });
 
-  it("reactivate_product compiles and succeeds against an active registry", async () => {
-    // No `pause` instruction exists in Module 1, so there is no way yet to
-    // put a registry into a genuinely paused state — this only exercises
-    // reactivate_product's auth + PDA lookup against an already-active one.
+  it("pause_product pauses (planned upgrade) and reactivate_product resumes, banking the paused time", async () => {
     const fakeSectorProgramId = Keypair.generate().publicKey;
     const [productRegistry] = productRegistryPda(fakeSectorProgramId);
 
     await send(registerProductIx(fakeSectorProgramId, 6500, [], 5, productRegistry), [sl8Admin, rovAdmin]);
-    await send(reactivateProductIx(fakeSectorProgramId, productRegistry), [sl8Admin, rovAdmin]);
+    await send(pauseProductIx(fakeSectorProgramId, productRegistry), [sl8Admin, rovAdmin]);
 
-    const info = await connection.getAccountInfo(productRegistry);
-    const registry = decodeProductRegistry(info!.data);
+    let registry = decodeProductRegistry((await connection.getAccountInfo(productRegistry))!.data);
+    assert.isFalse(registry.active);
+    assert.equal(registry.pauseReason, 1); // PAUSE_PLANNED_UPGRADE
+    assert.isTrue(registry.pausedSince > 0n);
+
+    // A second pause on an already-paused product must fail.
+    let threw = false;
+    try {
+      await send(pauseProductIx(fakeSectorProgramId, productRegistry), [sl8Admin, rovAdmin]);
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(threw, "expected pausing an already-paused product to fail");
+
+    await send(reactivateProductIx(fakeSectorProgramId, productRegistry), [sl8Admin, rovAdmin]);
+    registry = decodeProductRegistry((await connection.getAccountInfo(productRegistry))!.data);
     assert.isTrue(registry.active);
+    assert.equal(registry.pauseReason, 0);
+    assert.equal(registry.pausedSince, 0n);
+    assert.isTrue(registry.totalPausedSecs >= 0n);
+  });
+
+  it("rejects pause_product when rovAdmin's signature is missing", async () => {
+    const fakeSectorProgramId = Keypair.generate().publicKey;
+    const [productRegistry] = productRegistryPda(fakeSectorProgramId);
+    await send(registerProductIx(fakeSectorProgramId, 6500, [], 5, productRegistry), [sl8Admin, rovAdmin]);
+
+    let threw = false;
+    try {
+      await send(pauseProductIx(fakeSectorProgramId, productRegistry), [sl8Admin]);
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(threw, "expected pause_product to need both admin signatures");
   });
 });

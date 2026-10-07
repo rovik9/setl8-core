@@ -37,4 +37,40 @@ pub enum VaultError {
     /// with a clear instruction-level error.
     #[msg("challenge_sizes exceeds MAX_CHALLENGE_SIZES")]
     TooManyChallengeSizes,
+
+    #[msg("trader state is not in a status that allows this action")]
+    InvalidTraderStatus,
+
+    #[msg("(account_size, amount) is not a challenge tier registered for this product")]
+    InvalidChallengeTier,
+
+    #[msg("amount does not match the required price")]
+    WrongAmount,
+
+    #[msg("payout cap for this challenge has been reached")]
+    PayoutCapReached,
+
+    #[msg("proposed_request_id does not match the vault's expected next request id")]
+    RequestIdMismatch,
+
+    #[msg("challenge is not past its inactivity window")]
+    NotAbandonable,
+
+    #[msg("this record cannot be reset (not Failed, or already reset once)")]
+    ResetNotAllowed,
+
+    #[msg("reset_phase is outside the product's reset price table")]
+    InvalidResetPhase,
+
+    #[msg("reset_price_bps exceeds MAX_RESET_PHASES")]
+    TooManyResetPhases,
+
+    #[msg("product is already paused")]
+    ProductAlreadyPaused,
+
+    #[msg("payout amount must be greater than zero")]
+    ZeroAmount,
+
+    #[msg("arithmetic overflow")]
+    MathOverflow,
 }

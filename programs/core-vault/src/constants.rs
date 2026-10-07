@@ -5,6 +5,31 @@ use anchor_lang::prelude::*;
 /// program.
 pub const PRODUCT_REGISTRY_SEED: &[u8] = b"product_registry";
 
+/// Seed for the `TraderState` PDA: `[TRADER_STATE_SEED,
+/// product_program_id, trader_wallet, challenge_id.to_le_bytes()]`. One
+/// record per wallet + product + challenge; a new purchase is always a new
+/// record, never a reuse of an old one.
+pub const TRADER_STATE_SEED: &[u8] = b"trader_state";
+
+/// A challenge with no recorded activity for longer than this is abandoned.
+/// Stated in seconds (7 days, matching MFFU's rule), not heartbeat cycles, so
+/// it does not depend on where in a 5-day cycle a trader last acted. The
+/// clock freezes while the product is paused (see `ProductRegistry`).
+pub const INACTIVITY_LIMIT_SECS: i64 = 604_800;
+
+/// `record_activity` calls closer together than this are ignored, so a
+/// sector program can call it on every order action without write churn.
+pub const ACTIVITY_THROTTLE_SECS: i64 = 86_400;
+
+/// Upper bound on the phase-reset price table (one entry per phase).
+pub const MAX_RESET_PHASES: usize = 8;
+
+/// `ProductRegistry.pause_reason` values. Exactly two reasons are ever
+/// surfaced publicly: a planned upgrade, or a reconciliation deficit.
+pub const PAUSE_NONE: u8 = 0;
+pub const PAUSE_PLANNED_UPGRADE: u8 = 1;
+pub const PAUSE_RECONCILIATION_DEFICIT: u8 = 2;
+
 /// SL8's half of the 2-of-2 admin multisig required on every privileged
 /// vault instruction (`register_product`, `reactivate_product`,
 /// `update_product_config`).
@@ -30,7 +55,7 @@ pub const ROV_ADMIN_PUBKEY: Pubkey = pubkey!("D1EuhXLMWzz9Ypy9gkkwjpzVhEXi4RoDc6
 /// brief — **flagged assumption, confirm before Module 2**: raising this
 /// later requires a account-migration (realloc), so pick deliberately rather
 /// than inheriting this default.
-pub const MAX_CHALLENGE_SIZES: usize = 10;
+pub const MAX_CHALLENGE_SIZES: usize = 32;
 
 /// On-chain size of one Borsh-serialized `ChallengeSize` (`size: u64, cost:
 /// u64`) from `setl8-shared-interfaces`. That crate defines the struct, not

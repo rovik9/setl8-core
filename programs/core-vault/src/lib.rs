@@ -28,8 +28,16 @@ pub mod core_vault {
         fee_split_bps: u16,
         challenge_sizes: Vec<ChallengeSize>,
         max_payout_count: u64,
+        reset_price_bps: Vec<u16>,
     ) -> Result<()> {
-        instructions::register_product(ctx, product_program_id, fee_split_bps, challenge_sizes, max_payout_count)
+        instructions::register_product(
+            ctx,
+            product_program_id,
+            fee_split_bps,
+            challenge_sizes,
+            max_payout_count,
+            reset_price_bps,
+        )
     }
 
     pub fn reactivate_product(ctx: Context<ReactivateProduct>, product_program_id: Pubkey) -> Result<()> {
@@ -42,23 +50,79 @@ pub mod core_vault {
         challenge_sizes: Vec<ChallengeSize>,
         fee_split_bps: u16,
         max_payout_count: u64,
+        reset_price_bps: Vec<u16>,
     ) -> Result<()> {
-        instructions::update_product_config(ctx, product_program_id, challenge_sizes, fee_split_bps, max_payout_count)
+        instructions::update_product_config(
+            ctx,
+            product_program_id,
+            challenge_sizes,
+            fee_split_bps,
+            max_payout_count,
+            reset_price_bps,
+        )
     }
 
-    /// STUB — see `instructions::deposit_fee`. CPI-auth enforced; deposit
-    /// logic is `// TODO Module 2`.
+    /// Manual planned pause, 2-of-2. See `instructions::pause_product`.
+    pub fn pause_product(ctx: Context<PauseProduct>, product_program_id: Pubkey) -> Result<()> {
+        instructions::pause_product(ctx, product_program_id)
+    }
+
+    /// Creates the `TraderState` for a new challenge. Token movement is the
+    /// next module; see `instructions::deposit_fee`.
     pub fn deposit_fee(
         ctx: Context<DepositFee>,
         amount: u64,
         product_program_id: Pubkey,
         challenge_id: u64,
+        trader_wallet: Pubkey,
+        account_size: u64,
     ) -> Result<()> {
-        instructions::deposit_fee(ctx, amount, product_program_id, challenge_id)
+        instructions::deposit_fee(ctx, amount, product_program_id, challenge_id, trader_wallet, account_size)
     }
 
-    /// STUB — see `instructions::request_payout`. CPI-auth enforced; payout
-    /// logic is `// TODO Module 2/3`.
+    /// Phase-specific reset of a `Failed` record. See `instructions::deposit_reset`.
+    pub fn deposit_reset(
+        ctx: Context<DepositReset>,
+        amount: u64,
+        trader_wallet: Pubkey,
+        product_program_id: Pubkey,
+        prev_challenge_id: u64,
+        new_challenge_id: u64,
+        reset_phase: u8,
+    ) -> Result<()> {
+        instructions::deposit_reset(
+            ctx,
+            amount,
+            trader_wallet,
+            product_program_id,
+            prev_challenge_id,
+            new_challenge_id,
+            reset_phase,
+        )
+    }
+
+    /// Refreshes a challenge's inactivity clock. See `instructions::record_activity`.
+    pub fn record_activity(
+        ctx: Context<RecordActivity>,
+        trader_wallet: Pubkey,
+        product_program_id: Pubkey,
+        challenge_id: u64,
+    ) -> Result<()> {
+        instructions::record_activity(ctx, trader_wallet, product_program_id, challenge_id)
+    }
+
+    /// Permissionless. See `instructions::mark_abandoned`.
+    pub fn mark_abandoned(
+        ctx: Context<MarkAbandoned>,
+        trader_wallet: Pubkey,
+        product_program_id: Pubkey,
+        challenge_id: u64,
+    ) -> Result<()> {
+        instructions::mark_abandoned(ctx, trader_wallet, product_program_id, challenge_id)
+    }
+
+    /// Books one payout against the challenge cap. Token transfer is the next
+    /// module; see `instructions::request_payout`.
     pub fn request_payout(
         ctx: Context<RequestPayout>,
         trader_wallet: Pubkey,
@@ -70,8 +134,7 @@ pub mod core_vault {
         instructions::request_payout(ctx, trader_wallet, amount, product_program_id, challenge_id, proposed_request_id)
     }
 
-    /// STUB — see `instructions::flag_trader_failed`. CPI-auth enforced;
-    /// state mutation is `// TODO Module 2`.
+    /// Marks a challenge `Failed`. See `instructions::flag_trader_failed`.
     pub fn flag_trader_failed(
         ctx: Context<FlagTraderFailed>,
         trader_wallet: Pubkey,
