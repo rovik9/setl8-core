@@ -464,8 +464,23 @@ impl Env {
     pub fn flag(&mut self, s: &Sector, w: &Pubkey, id: u64) {
         self.ok(flag_ix(s, w, id));
     }
+    /// Successful payout. Tops the USDC pool up to at least `amount` first (a
+    /// test shortcut: the older tests care about request ids and statuses, not
+    /// about pool liquidity). Tests about liquidity set pools explicitly with
+    /// `set_pool` and send `payout_ix` themselves.
     pub fn payout(&mut self, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64) -> TransactionMetadata {
-        self.ok(payout_ix(s, w, id, amount, req))
+        self.fund_wallet(w);
+        let have = self.token_balance(&self.usdc_pool.clone());
+        if have < amount {
+            self.set_pool(Coin::Usdc, amount);
+        }
+        let ix = payout_ix(self, s, w, id, amount, req);
+        self.ok(ix)
+    }
+    /// Sets a pool's token balance directly (edits the token account).
+    pub fn set_pool(&mut self, c: Coin, amount: u64) {
+        let pool = self.coin(c).1;
+        self.edit_token_account(&pool, |a| a.amount = amount);
     }
     /// Permissionless; `caller` pays the fee and signs.
     pub fn abandon_as(&mut self, caller: &Keypair, s: &Sector, w: &Pubkey, id: u64) -> TransactionResult {
@@ -719,12 +734,49 @@ pub fn flag_ix(s: &Sector, w: &Pubkey, id: u64) -> Instruction {
     )
 }
 
-pub fn payout_ix(s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64) -> Instruction {
+/// request_payout: 0 auth, 1 registry, 2 trader_state, then the appended
+/// token accounts.
+#[derive(Clone, Copy)]
+pub struct PayoutSlots {
+    pub vault: usize,
+    pub usdc_mint: usize,
+    pub usdt_mint: usize,
+    pub usdc_pool: usize,
+    pub usdt_pool: usize,
+    pub trader_usdc: usize,
+    pub trader_usdt: usize,
+    pub token_program: usize,
+}
+pub const PO: PayoutSlots = PayoutSlots {
+    vault: 3,
+    usdc_mint: 4,
+    usdt_mint: 5,
+    usdc_pool: 6,
+    usdt_pool: 7,
+    trader_usdc: 8,
+    trader_usdt: 9,
+    token_program: 10,
+};
+
+/// The wallet must already have token accounts (`fund_wallet`, which every
+/// `deposit*` helper does).
+pub fn payout_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64) -> Instruction {
+    let t = e.wallet_tok(w);
     si::request_payout(
         core_vault::ID,
         s.authority,
         s.registry(),
-        &[AccountMeta::new(s.trader(w, id), false)],
+        &[
+            AccountMeta::new(s.trader(w, id), false),
+            AccountMeta::new_readonly(e.vault, false),
+            AccountMeta::new_readonly(e.usdc, false),
+            AccountMeta::new_readonly(e.usdt, false),
+            AccountMeta::new(e.usdc_pool, false),
+            AccountMeta::new(e.usdt_pool, false),
+            AccountMeta::new(t.usdc, false),
+            AccountMeta::new(t.usdt, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
         si::RequestPayoutArgs {
             trader_wallet: *w,
             amount,

@@ -181,7 +181,7 @@ fn new_record_inherits_from_prev_and_prev_is_marked_used() {
     assert_eq!(prev.last_activity_timestamp, prev_before.last_activity_timestamp);
 
     // The new record continues the payout sequence where prev stopped.
-    let r = e.send(payout_ix(&s, &w, 2, 10, 1));
+    let r = e.send(payout_ix(&e, &s, &w, 2, 10, 1));
     assert_vault_err(&r, VaultError::RequestIdMismatch);
     e.payout(&s, &w, 2, 10, 2);
     assert_eq!(e.trader(&s, &w, 2).payout_count, 2);
@@ -318,7 +318,7 @@ fn run_chain(tier: (u64, u64)) {
     assert_eq!(last.status, TraderStatus::Active);
     assert!(!last.reset_used);
     // ...and the payout sequence continues where the original left off
-    assert_vault_err(&e.send(payout_ix(&s, &w, 4, 10, 1)), VaultError::RequestIdMismatch);
+    assert_vault_err(&e.send(payout_ix(&e, &s, &w, 4, 10, 1)), VaultError::RequestIdMismatch);
     e.payout(&s, &w, 4, 10, 2);
     assert_eq!(e.trader(&s, &w, 4).payout_count, 2);
 }

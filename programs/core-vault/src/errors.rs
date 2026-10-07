@@ -97,4 +97,7 @@ pub enum VaultError {
 
     #[msg("the product's fee_split_bps is above 10_000")]
     InvalidFeeSplit,
+
+    #[msg("the larger payout pool does not hold enough to pay this amount")]
+    InsufficientPoolBalance,
 }

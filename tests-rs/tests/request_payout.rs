@@ -56,7 +56,7 @@ fn graduates_exactly_at_max_payout_count() {
     assert_eq!(ts.payout_count, 3);
     assert_eq!(e.registry(&s).total_requests_emitted, 3);
     // Graduated is terminal for payouts
-    let r = e.send(payout_ix(&s, &w, 1, 10, 4));
+    let r = e.send(payout_ix(&e, &s, &w, 1, 10, 4));
     assert_vault_err(&r, VaultError::InvalidTraderStatus);
     assert_eq!(e.registry(&s).total_requests_emitted, 3);
 }
@@ -111,7 +111,7 @@ fn payout_cap_reached_after_the_cap_is_lowered_below_the_count() {
     e.payout(&s, &w, 1, 10, 2);
     e.update(&s, &Cfg { max_payout: 2, ..Cfg::default() });
     for bad_id in [3u64, 99] {
-        let r = e.send(payout_ix(&s, &w, 1, 10, bad_id));
+        let r = e.send(payout_ix(&e, &s, &w, 1, 10, bad_id));
         assert_vault_err(&r, VaultError::PayoutCapReached); // cap is checked before the id
     }
     let ts = e.trader(&s, &w, 1);
@@ -123,14 +123,14 @@ fn payout_cap_reached_after_the_cap_is_lowered_below_the_count() {
 fn request_id_must_equal_count_plus_one() {
     let (mut e, s, w) = setup();
     for bad in [0u64, 2, 5, u64::MAX] {
-        let r = e.send(payout_ix(&s, &w, 1, 10, bad));
+        let r = e.send(payout_ix(&e, &s, &w, 1, 10, bad));
         assert_vault_err(&r, VaultError::RequestIdMismatch);
     }
     assert_eq!(e.trader(&s, &w, 1).payout_count, 0);
     e.payout(&s, &w, 1, 10, 1);
     // replay (too low) and skip-ahead (too high)
     for bad in [0u64, 1, 3, 4] {
-        let r = e.send(payout_ix(&s, &w, 1, 10, bad));
+        let r = e.send(payout_ix(&e, &s, &w, 1, 10, bad));
         assert_vault_err(&r, VaultError::RequestIdMismatch);
     }
     assert_eq!(e.trader(&s, &w, 1).payout_count, 1);
@@ -140,7 +140,7 @@ fn request_id_must_equal_count_plus_one() {
 #[test]
 fn zero_amount_is_rejected() {
     let (mut e, s, w) = setup();
-    let r = e.send(payout_ix(&s, &w, 1, 0, 1));
+    let r = e.send(payout_ix(&e, &s, &w, 1, 0, 1));
     assert_vault_err(&r, VaultError::ZeroAmount);
     assert_eq!(e.trader(&s, &w, 1).payout_count, 0);
 }
@@ -149,7 +149,7 @@ fn zero_amount_is_rejected() {
 fn rejected_while_product_is_paused() {
     let (mut e, s, w) = setup();
     e.pause(&s);
-    let r = e.send(payout_ix(&s, &w, 1, 10, 1));
+    let r = e.send(payout_ix(&e, &s, &w, 1, 10, 1));
     assert_vault_err(&r, VaultError::ProductNotActive);
     e.resume(&s);
     e.payout(&s, &w, 1, 10, 1);
@@ -160,11 +160,11 @@ fn failed_and_abandoned_records_are_invalid_status() {
     let (mut e, s, w) = setup();
     e.deposit(&s, &w, 2);
     e.flag(&s, &w, 1);
-    assert_vault_err(&e.send(payout_ix(&s, &w, 1, 10, 1)), VaultError::InvalidTraderStatus);
+    assert_vault_err(&e.send(payout_ix(&e, &s, &w, 1, 10, 1)), VaultError::InvalidTraderStatus);
 
     e.advance(8 * DAY);
     assert_ok(e.abandon(&s, &w, 2));
-    assert_vault_err(&e.send(payout_ix(&s, &w, 2, 10, 1)), VaultError::InvalidTraderStatus);
+    assert_vault_err(&e.send(payout_ix(&e, &s, &w, 2, 10, 1)), VaultError::InvalidTraderStatus);
     assert_eq!(e.registry(&s).total_requests_emitted, 0);
 }
 
@@ -176,8 +176,8 @@ fn total_requests_emitted_counts_only_paid_outcomes() {
 
     e.payout(&s, &w1, 1, 10, 1); // Paid => 1
     assert_eq!(e.registry(&s).total_requests_emitted, 1);
-    assert_vault_err(&e.send(payout_ix(&s, &w1, 1, 10, 7)), VaultError::RequestIdMismatch); // Err => 1
-    assert_vault_err(&e.send(payout_ix(&s, &w1, 1, 0, 2)), VaultError::ZeroAmount); // Err => 1
+    assert_vault_err(&e.send(payout_ix(&e, &s, &w1, 1, 10, 7)), VaultError::RequestIdMismatch); // Err => 1
+    assert_vault_err(&e.send(payout_ix(&e, &s, &w1, 1, 0, 2)), VaultError::ZeroAmount); // Err => 1
     assert_eq!(e.registry(&s).total_requests_emitted, 1);
 
     // w1 stays fresh via its payout; make only w2 stale by not touching it...
@@ -193,7 +193,7 @@ fn total_requests_emitted_counts_only_paid_outcomes() {
 #[test]
 fn stranger_authority_is_unauthorized() {
     let (mut e, s, w) = setup();
-    let mut ix = payout_ix(&s, &w, 1, 10, 1);
+    let mut ix = payout_ix(&e, &s, &w, 1, 10, 1);
     ix.accounts[0].pubkey = Pubkey::new_unique();
     assert_vault_err(&e.send(ix), VaultError::Unauthorized);
     assert_eq!(e.trader(&s, &w, 1).payout_count, 0);
@@ -202,7 +202,7 @@ fn stranger_authority_is_unauthorized() {
 #[test]
 fn another_sectors_authority_is_unauthorized() {
     let (mut e, s, w) = setup();
-    let mut ix = payout_ix(&s, &w, 1, 10, 1);
+    let mut ix = payout_ix(&e, &s, &w, 1, 10, 1);
     ix.accounts[0].pubkey = Sector::new().authority;
     assert_vault_err(&e.send(ix), VaultError::Unauthorized);
 }
@@ -210,7 +210,7 @@ fn another_sectors_authority_is_unauthorized() {
 #[test]
 fn authority_that_is_not_a_signer_is_rejected() {
     let (mut e, s, w) = setup();
-    let mut ix = payout_ix(&s, &w, 1, 10, 1);
+    let mut ix = payout_ix(&e, &s, &w, 1, 10, 1);
     ix.accounts[0].is_signer = false;
     assert_anchor_err(&e.send(ix), ErrorCode::AccountNotSigner);
 }
@@ -218,6 +218,6 @@ fn authority_that_is_not_a_signer_is_rejected() {
 #[test]
 fn unknown_challenge_is_rejected() {
     let (mut e, s, w) = setup();
-    let r = e.send(payout_ix(&s, &w, 404, 10, 1));
+    let r = e.send(payout_ix(&e, &s, &w, 404, 10, 1));
     assert_anchor_err(&r, ErrorCode::AccountNotInitialized);
 }
