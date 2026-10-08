@@ -1,49 +1,17 @@
-mod deposit_fee;
-mod deposit_reset;
-mod flag_trader_failed;
-mod init_vault;
-mod mark_abandoned;
-mod pause_product;
-mod record_activity;
-mod reactivate_product;
-mod register_product;
-mod request_payout;
-mod token_payment;
-mod update_product_config;
+//! One file per instruction (its `Accounts` struct plus handler), grouped by WHO
+//! may call it:
+//!
+//! * `admin`          -- the 2-of-2 admin multisig
+//! * `sector`         -- a registered sector program, via CPI
+//! * `permissionless` -- anyone
+//!
+//! Everything is re-exported flat, so `crate::instructions::DepositFee` etc. do
+//! not depend on the folder.
 
-pub use deposit_fee::*;
-pub use deposit_reset::*;
-pub use flag_trader_failed::*;
-pub use init_vault::*;
-pub use mark_abandoned::*;
-pub use pause_product::*;
-pub use record_activity::*;
-pub use reactivate_product::*;
-pub use register_product::*;
-pub use request_payout::*;
-pub use token_payment::*;
-pub use update_product_config::*;
+mod admin;
+mod permissionless;
+mod sector;
 
-use anchor_lang::prelude::*;
-use setl8_shared_interfaces::derive_sector_authority;
-
-use crate::errors::VaultError;
-
-/// The core CPI-auth security invariant shared by every inbound
-/// sector-program call (`deposit_fee`, `request_payout`,
-/// `flag_trader_failed`).
-///
-/// A PDA can only be signed via `invoke_signed` by the program it was
-/// derived from. So a valid signature from `sector_authority` here —
-/// checked against `derive_sector_authority(&registry.product_program_id)`,
-/// the seed/derivation owned by `setl8-shared-interfaces`, never
-/// re-implemented locally — is cryptographic proof the call actually
-/// originated from the program registered as `product_program_id`, not a
-/// self-reported claim. Accepting a caller-supplied program-id field
-/// instead of this check would let any program impersonate any registered
-/// sector program and corrupt or drain that product's state.
-pub fn assert_sector_authority(sector_authority: &Pubkey, registry_product_program_id: &Pubkey) -> Result<()> {
-    let (expected_sector_authority, _bump) = derive_sector_authority(registry_product_program_id);
-    require_keys_eq!(*sector_authority, expected_sector_authority, VaultError::Unauthorized);
-    Ok(())
-}
+pub use admin::*;
+pub use permissionless::*;
+pub use sector::*;

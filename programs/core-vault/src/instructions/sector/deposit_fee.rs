@@ -5,7 +5,7 @@ use crate::constants::{
     PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED, VAULT_STATE_SEED,
 };
 use crate::errors::VaultError;
-use crate::instructions::{assert_sector_authority, plan_payment, Payment};
+use crate::utils::{assert_sector_authority, plan_payment, Payment};
 use crate::state::{ProductRegistry, TraderState, TraderStatus, VaultState};
 
 #[derive(Accounts)]

@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{PRODUCT_REGISTRY_SEED, TRADER_STATE_SEED};
 use crate::errors::VaultError;
-use crate::instructions::assert_sector_authority;
+use crate::utils::assert_sector_authority;
 use crate::state::{ProductRegistry, TraderState, TraderStatus};
 
 #[derive(Accounts)]

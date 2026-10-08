@@ -1,0 +1,20 @@
+//! PDA seeds. Every account this program owns is derived from one of these.
+
+/// Seed for the `ProductRegistry` PDA: `[PRODUCT_REGISTRY_SEED,
+/// product_program_id.as_ref()]`, one registry per registered sector
+/// program.
+pub const PRODUCT_REGISTRY_SEED: &[u8] = b"product_registry";
+
+/// Seed for the `TraderState` PDA: `[TRADER_STATE_SEED,
+/// product_program_id, trader_wallet, challenge_id.to_le_bytes()]`. One
+/// record per wallet + product + challenge; a new purchase is always a new
+/// record, never a reuse of an old one.
+pub const TRADER_STATE_SEED: &[u8] = b"trader_state";
+
+/// Seed for the singleton `VaultState` PDA: `[VAULT_STATE_SEED,
+/// SL8_ADMIN_PUBKEY, ROV_ADMIN_PUBKEY]`.
+pub const VAULT_STATE_SEED: &[u8] = b"vault_state";
+
+/// Seed for the two payout-pool token accounts: `[POOL_SEED, vault_state,
+/// mint]`. Their token authority is the `VaultState` PDA.
+pub const POOL_SEED: &[u8] = b"pool";

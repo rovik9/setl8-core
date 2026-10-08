@@ -4,7 +4,7 @@ use setl8_shared_interfaces::ActivityOutcome;
 
 use crate::constants::{ACTIVITY_THROTTLE_SECS, PRODUCT_REGISTRY_SEED, TRADER_STATE_SEED};
 use crate::errors::VaultError;
-use crate::instructions::assert_sector_authority;
+use crate::utils::assert_sector_authority;
 use crate::state::{ProductRegistry, TraderState, TraderStatus};
 
 #[derive(Accounts)]

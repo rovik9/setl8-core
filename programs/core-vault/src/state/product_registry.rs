@@ -10,7 +10,7 @@ use crate::constants::{CHALLENGE_SIZE_SPACE, MAX_CHALLENGE_SIZES, MAX_RESET_PHAS
 pub struct ProductRegistry {
     /// The sector program's own on-chain program ID. This is what
     /// `derive_sector_authority` is checked against on every CPI-auth-context
-    /// instruction — see `instructions::assert_sector_authority`.
+    /// instruction — see `utils::assert_sector_authority`.
     pub product_program_id: Pubkey,
     /// Challenge size/cost tiers this product offers. Bounded to
     /// `MAX_CHALLENGE_SIZES` entries by the account's fixed on-chain space.

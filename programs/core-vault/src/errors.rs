@@ -9,9 +9,9 @@ pub enum VaultError {
     #[msg("sector_authority does not match the registered product's derived CPI authority")]
     Unauthorized,
 
-    /// Reserved for Module 2/3 payout logic (`request_payout` will reject
-    /// against a paused product once that logic lands). Not triggered by
-    /// any code path in Module 1's stubs.
+    /// The product is paused (or otherwise inactive). Returned by the
+    /// instructions that take money or pay out for a product:
+    /// `deposit_fee`, `deposit_reset` and `request_payout`.
     #[msg("product is not active")]
     ProductNotActive,
 
