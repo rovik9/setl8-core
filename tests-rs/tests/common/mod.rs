@@ -559,6 +559,36 @@ impl Env {
         (self.token_snapshot(), self.svm.get_account(&self.vault).unwrap().data, claims)
     }
 
+    // ---- payout tally (the sector-owned account reconcile_product reads)
+    /// A valid 25-byte tally owned by the sector program, written with the shared
+    /// crate's own `PayoutTally::write_into`.
+    pub fn set_tally(&mut self, s: &Sector, count: u64, total: u64) {
+        let mut data = vec![0u8; si::PAYOUT_TALLY_MIN_LEN];
+        si::PayoutTally { requested_count: count, requested_total: total }.write_into(&mut data).unwrap();
+        self.set_raw(&tally_addr(s), data, s.id);
+    }
+    /// Raw bytes and owner at the sector's tally address.
+    pub fn set_tally_raw(&mut self, s: &Sector, data: Vec<u8>, owner: Pubkey) {
+        self.set_raw(&tally_addr(s), data, owner);
+    }
+    pub fn remove_tally(&mut self, s: &Sector) {
+        self.svm.set_account(tally_addr(s), RawAccount::default()).unwrap();
+    }
+    /// Only lamports at the tally address (a system account with no data).
+    pub fn dust_tally(&mut self, s: &Sector, lamports: u64) {
+        self.svm
+            .set_account(tally_addr(s), RawAccount { lamports, data: vec![], owner: system_program::ID, executable: false, rent_epoch: 0 })
+            .unwrap();
+    }
+    pub fn reconcile(&mut self, s: &Sector) -> TransactionMetadata {
+        let ix = reconcile_ix(&self.payer.pubkey(), s);
+        self.ok(ix)
+    }
+    pub fn reconcile_result(&mut self, s: &Sector) -> TransactionResult {
+        let ix = reconcile_ix(&self.payer.pubkey(), s);
+        self.send(ix)
+    }
+
     // ---- heartbeat (assert success)
     /// A funded caller distinct from the fee payer (so its own balance moves only
     /// by what the instruction does to it).
@@ -948,6 +978,25 @@ pub fn payout_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64
             proposed_request_id: req,
         },
     )
+}
+
+// ----------------------------------------------------------- reconciliation builder
+
+pub fn tally_addr(s: &Sector) -> Pubkey {
+    si::derive_payout_tally(&s.id).0
+}
+
+pub fn reconcile_ix(caller: &Pubkey, s: &Sector) -> Instruction {
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::ReconcileProduct {
+            caller: *caller,
+            product_registry: s.registry(),
+            payout_tally: tally_addr(s),
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::ReconcileProduct { product_program_id: s.id }.data(),
+    }
 }
 
 // ------------------------------------------------------------- heartbeat builders

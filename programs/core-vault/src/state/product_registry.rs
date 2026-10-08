@@ -21,8 +21,9 @@ pub struct ProductRegistry {
     /// Cap on outstanding payouts the vault will allow for this product.
     pub max_payout_count: u64,
     pub active: bool,
-    /// Running count for heartbeat reconciliation (Module 3+); untouched by
-    /// Module 1.
+    /// Number of `request_payout` calls accepted and queued for this product
+    /// (the stale/Abandoned path does not count). Reconciled against the sector's
+    /// payout tally by `reconcile_product`.
     pub total_requests_emitted: u64,
     /// Phase-reset prices in basis points of account size, indexed by the
     /// 0-based phase a trader failed in. Empty = no phase resets offered.
@@ -34,6 +35,10 @@ pub struct ProductRegistry {
     /// Total seconds spent paused in completed pauses. Together with
     /// `paused_since` this lets the inactivity clock freeze during pauses.
     pub total_paused_secs: i64,
+    /// Sum of the `amount` of every accepted `request_payout`, bumped at the same
+    /// moment as `total_requests_emitted` (6-decimal dollar units). Only ever
+    /// grows. Reconciled against the sector's payout tally.
+    pub total_requested_amount: u64,
     /// Canonical PDA bump for `[PRODUCT_REGISTRY_SEED,
     /// product_program_id.as_ref()]`, stored so later instructions can pass
     /// `bump = product_registry.bump` instead of re-deriving.
@@ -55,6 +60,7 @@ impl ProductRegistry {
         + 1 // pause_reason
         + 8 // paused_since
         + 8 // total_paused_secs
+        + 8 // total_requested_amount
         + 1; // bump
 
     /// Total seconds this product has spent paused as of `now`, including a

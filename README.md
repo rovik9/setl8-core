@@ -34,7 +34,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 |---|---|---|
 | `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product` | Both admin signatures (SL8 + Rov) |
 | `sector/` | `deposit_fee`, `deposit_reset`, `record_activity`, `request_payout`, `flag_trader_failed` | A registered sector program via CPI, authenticated by its `sector_authority` PDA |
-| `permissionless/` | `mark_abandoned`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
+| `permissionless/` | `mark_abandoned`, `reconcile_product`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
 
 The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's on-chain identity against the `ProductRegistry` and never trusts a self-reported program ID.
 
@@ -59,9 +59,10 @@ programs/core-vault/src/
   instructions/       one file per instruction (Accounts struct + handler)
     admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product
     sector/             deposit_fee, deposit_reset, record_activity, request_payout, flag_trader_failed
-    permissionless/     mark_abandoned, begin_heartbeat, settle_claims, finalize_heartbeat
+    permissionless/     mark_abandoned, reconcile_product, begin_heartbeat, settle_claims, finalize_heartbeat
   utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers),
-                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), pda_account.rs
+                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check),
+                      pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tests/                Anchor TypeScript tests + admin test keypairs
 scripts/              build, test and deploy-gate scripts (see below)
@@ -110,6 +111,21 @@ scripts/test-all.sh               # everything below, stops at the first failure
 `tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and the payout queue with its pro-rata heartbeat settlement. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
 
 Don't use plain `anchor test`: it would load the real-key build, which the suite cannot sign for.
+
+## Reconciliation
+
+The vault and each sector program keep independent books of the same thing: how much the sector has asked the vault to pay. `reconcile_product` compares them and **auto-pauses a product whose books disagree**.
+
+- **The vault's books.** `ProductRegistry` counts `total_requests_emitted` (accepted `request_payout` calls) and `total_requested_amount` (the sum of their `amount`s), both bumped at the same moment a claim is queued. The stale/`Abandoned` path counts nothing.
+- **The sector's books.** Every sector program keeps a *payout tally*, a PDA owned by the sector at `derive_payout_tally(product_program_id)`, laid out as defined in `setl8-shared-interfaces` (`PayoutTally`): `requested_count` and `requested_total`, updated in the same transaction whenever `request_payout` returns `Paid`.
+- **The check.** `reconcile_product(product_program_id)` is permissionless; any signer pays the fee. Accounts, in order: `caller` (signer), `product_registry` (writable PDA), `payout_tally` (read-only, must be exactly the canonical tally address or the call fails with `InvalidTally`; junk can never pause a product).
+  - The product must be active; an already-paused product fails with `ProductAlreadyPaused` and keeps its original pause reason and time.
+  - A tally owned by the sector is read with the shared crate's own parser. An unparseable one is a mismatch. No data and not owned by the sector (nonexistent, or only holding lamports) counts as `0 / 0`. Data owned by anyone else is a mismatch.
+  - Both numbers must be equal: a difference in either field, in either direction, is a mismatch.
+  - On a mismatch the product is paused with reason `PAUSE_RECONCILIATION_DEFICIT` (`paused_since` = now), the four numbers are logged, and the call still returns **Ok** so the pause persists. On a match nothing changes.
+- **What a pause does.** `deposit_fee`, `deposit_reset` and `request_payout` fail with `ProductNotActive`, and traders' inactivity clocks freeze. Claims already queued are **still settled** by the heartbeat. Un-pausing stays 2-of-2 (`reactivate_product`).
+- **Keeper duty.** The heartbeat instructions do not call `reconcile_product`. The keeper must call it for **every product before each `begin_heartbeat`**.
+- **Known limit.** Both sides' counts only ever go up. A sector that *under*-reports can catch up and then match again after an admin reactivates it. A sector whose tally *over*-reports (it counted a request the vault never accepted) can never match again: the vault's books cannot be lowered to meet it, so every reconcile re-pauses it. Such a product is permanently unusable and must be replaced by registering a new product.
 
 ## Design notes
 

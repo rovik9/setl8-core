@@ -124,4 +124,7 @@ pub enum VaultError {
 
     #[msg("settle_claims needs at least one claim")]
     EmptyBatch,
+
+    #[msg("the payout_tally account is not the product's canonical payout-tally address")]
+    InvalidTally,
 }

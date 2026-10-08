@@ -193,4 +193,11 @@ pub mod core_vault {
     pub fn finalize_heartbeat(ctx: Context<FinalizeHeartbeat>) -> Result<()> {
         instructions::finalize_heartbeat(ctx)
     }
+
+    /// Permissionless. Compares the sector's payout tally with the vault's books
+    /// and pauses the product on any mismatch. See
+    /// `instructions::permissionless::reconcile_product`.
+    pub fn reconcile_product(ctx: Context<ReconcileProduct>, product_program_id: Pubkey) -> Result<()> {
+        instructions::reconcile_product(ctx, product_program_id)
+    }
 }

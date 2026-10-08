@@ -78,8 +78,9 @@ pub struct RequestPayout<'info> {
 /// must read the return data before telling anyone a payout was queued.
 ///
 /// Otherwise (`PayoutOutcome::Paid`, meaning "accepted and queued") the claim is
-/// created with `owed = amount`, and `open_claims_count` / `open_claims_total`
-/// grow. The claim is created last, after every check, by hand (see
+/// created with `owed = amount`, `open_claims_count` / `open_claims_total` grow,
+/// and the product's `total_requests_emitted` / `total_requested_amount` (the
+/// numbers `reconcile_product` compares with the sector's tally) grow too. The claim is created last, after every check, by hand (see
 /// `payout_claim`).
 pub fn request_payout(
     ctx: Context<RequestPayout>,
@@ -121,6 +122,10 @@ pub fn request_payout(
     registry.total_requests_emitted = registry
         .total_requests_emitted
         .checked_add(1)
+        .ok_or(VaultError::MathOverflow)?;
+    registry.total_requested_amount = registry
+        .total_requested_amount
+        .checked_add(amount)
         .ok_or(VaultError::MathOverflow)?;
 
     if ts.payout_count >= registry.max_payout_count {

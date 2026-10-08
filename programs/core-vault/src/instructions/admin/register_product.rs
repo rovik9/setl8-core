@@ -62,6 +62,7 @@ pub fn register_product(
     registry.max_payout_count = max_payout_count;
     registry.active = true;
     registry.total_requests_emitted = 0;
+    registry.total_requested_amount = 0;
     registry.reset_price_bps = reset_price_bps;
     registry.pause_reason = PAUSE_NONE;
     registry.paused_since = 0;
