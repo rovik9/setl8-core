@@ -2689,8 +2689,8 @@ dependencies = [
 
 [[package]]
 name = "setl8-shared-interfaces"
-version = "0.3.1"
-source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.3.1#f64287d66eece1faa752b6f10637a3e0ea31f8c2"
+version = "0.3.2"
+source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.3.2#a00bfc25a340673fa086f4a83b30a584dfb2ce62"
 dependencies = [
  "borsh 0.10.4",
  "solana-program",

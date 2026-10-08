@@ -48,4 +48,4 @@ anchor-spl = { version = "0.32.1", default-features = false, features = ["token"
 # register/update, and trader_wallet + account_size on DepositFeeArgs.
 # (idl-build was added in v0.2.1.) v0.3.1 fixes the register_product builder
 # (sl8_admin is writable: it pays the registry rent).
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.1" }
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.2" }
