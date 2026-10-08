@@ -10,7 +10,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 | Program ID (localnet) | `2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft` |
 | Anchor | 0.32.1 |
 | Tokens | classic SPL Token only, 6-decimal USDC and USDT (Token-2022 is rejected) |
-| Shared types | [`setl8-shared-interfaces`](https://github.com/rovik9/setl8-turbo) pinned at tag `v0.3.1` |
+| Shared types | [`setl8-shared-interfaces`](https://github.com/rovik9/setl8-turbo) pinned at tag `v0.3.2` |
 
 > **Status: pre-audit, not deployed.** See [Keys and builds](#keys-and-builds) before building anything you intend to deploy.
 
@@ -20,7 +20,13 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 2. **Register a sector.** The admins call `register_product` for a sector program. This stores a `ProductRegistry` PDA with its challenge sizes, its fee split (`fee_split_bps`), its reset price and its payout cap.
 3. **Money in.** When a trader pays, the sector program CPIs `deposit_fee` (new challenge) or `deposit_reset` (reset). The vault pulls the payment from the trader and splits it: `pool = floor(amount × fee_split_bps / 10_000)` goes to the matching pool and the remainder goes to the SL8 token account.
 4. **Activity tracking.** The sector calls `record_activity` to prove a trader is still active. A trader who is inactive for **more than 7 days** is stale, and `mark_abandoned` (callable by anyone) can mark them `Abandoned`. Pausing a product freezes the inactivity clock.
-5. **Money out.** The sector CPIs `request_payout`. The vault pays out of whichever pool holds more (a tie goes to USDC). It never mixes the two pools, and fails with `InsufficientPoolBalance` if that pool is too small.
+5. **Money out is queued.** The sector CPIs `request_payout`. It validates the request exactly as before (active product, status, inactivity, payout cap, request id) but moves **no tokens**: it records a `PayoutClaim` (the amount owed to the trader, in 6-decimal dollar units, USDC = USDT = $1) and bumps `open_claims_count` / `open_claims_total` on `VaultState`. A stale challenge still flips to `Abandoned` and creates no claim.
+
+   Claims are paid by a permissionless **heartbeat**, at most once every 5 days (`HEARTBEAT_MIN_GAP_SECS = 432_000`, measured between cycle starts):
+
+   1. `begin_heartbeat` opens a cycle and snapshots the total owed and the total available in the two pools.
+   2. `settle_claims` is called in batches. Every eligible claim is paid the same pro-rata share, `min(available, owed) / owed`, of what it is owed, from the larger pool first and topped up from the other. Destinations are the trader's associated token accounts; a claim whose accounts are unusable is skipped and stays owed. Whatever is unpaid stays owed and carries over, with no priority by age and no expiry. A claim paid in full is closed and its rent goes to the caller.
+   3. `finalize_heartbeat` ends the cycle once every eligible claim has been processed, and sets each pool's reserve floor to 25% of its balance. Floors only constrain a future admin withdrawal; they never limit claim settlement.
 
 ### Who may call what
 
@@ -40,6 +46,7 @@ The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's
 | Pool token account | `["pool", vault_state, mint]` | The USDC / USDT funds |
 | `ProductRegistry` | `["product_registry", product_program_id]` | Per-sector config and `active` flag |
 | `TraderState` | per wallet + product + challenge | Trader status, activity clock, reset history |
+| `PayoutClaim` | `["payout_claim", trader_state, request_id]` | An amount owed to a trader, until a heartbeat cycle pays it |
 
 ## Repository layout
 

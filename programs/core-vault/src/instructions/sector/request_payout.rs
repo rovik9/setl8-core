@@ -1,17 +1,17 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::set_return_data;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 use setl8_shared_interfaces::PayoutOutcome;
 
 use crate::constants::{
-    PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED, VAULT_STATE_SEED,
+    PAYOUT_CLAIM_SEED, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED,
+    VAULT_STATE_SEED,
 };
 use crate::errors::VaultError;
-use crate::utils::assert_sector_authority;
-use crate::state::{ProductRegistry, TraderState, TraderStatus, VaultState};
+use crate::state::{PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
+use crate::utils::{assert_sector_authority, create_pda_account};
 
 #[derive(Accounts)]
-#[instruction(trader_wallet: Pubkey, amount: u64, product_program_id: Pubkey, challenge_id: u64)]
+#[instruction(trader_wallet: Pubkey, amount: u64, product_program_id: Pubkey, challenge_id: u64, proposed_request_id: u64)]
 pub struct RequestPayout<'info> {
     /// CPI-auth identity: the calling sector program's own PDA. See
     /// `assert_sector_authority` for what a valid signature here proves.
@@ -36,70 +36,56 @@ pub struct RequestPayout<'info> {
     )]
     pub trader_state: Box<Account<'info, TraderState>>,
 
-    // ---- token movement (appended; everything above keeps its position) ----
+    // ---- payout queue (appended; everything above keeps its position) ----
     // Large accounts are boxed: an unboxed `try_accounts` frame past 4,096
     // bytes silently corrupts memory on SBF.
+    /// Holds the open-claims counters and the current cycle id.
     #[account(
+        mut,
         seeds = [VAULT_STATE_SEED, SL8_ADMIN_PUBKEY.as_ref(), ROV_ADMIN_PUBKEY.as_ref()],
         bump = vault_state.bump,
     )]
     pub vault_state: Box<Account<'info, VaultState>>,
 
-    #[account(address = vault_state.usdc_mint @ VaultError::InvalidMint)]
-    pub usdc_mint: Box<Account<'info, Mint>>,
-
-    #[account(address = vault_state.usdt_mint @ VaultError::InvalidMint)]
-    pub usdt_mint: Box<Account<'info, Mint>>,
-
-    #[account(mut, address = vault_state.usdc_pool @ VaultError::InvalidTokenAccount)]
-    pub usdc_pool: Box<Account<'info, TokenAccount>>,
-
-    #[account(mut, address = vault_state.usdt_pool @ VaultError::InvalidTokenAccount)]
-    pub usdt_pool: Box<Account<'info, TokenAccount>>,
-
-    /// The trader's own USDC account. Checked even when USDT is the pool paid
-    /// from: a trader without BOTH accounts cannot be paid.
+    /// CHECK: the new claim's PDA. Deliberately NOT created with Anchor `init`:
+    /// `init` would create it before the handler runs, and the stale path
+    /// returns Ok (so `Abandoned` persists), which would leave an empty claim
+    /// account behind. The handler creates it by hand, only once every check
+    /// has passed.
     #[account(
         mut,
-        constraint = trader_usdc_account.owner == trader_wallet && trader_usdc_account.mint == usdc_mint.key()
-            @ VaultError::InvalidTokenAccount,
+        seeds = [PAYOUT_CLAIM_SEED, trader_state.key().as_ref(), &proposed_request_id.to_le_bytes()],
+        bump,
     )]
-    pub trader_usdc_account: Box<Account<'info, TokenAccount>>,
+    pub payout_claim: UncheckedAccount<'info>,
 
-    /// The trader's own USDT account (see `trader_usdc_account`).
-    #[account(
-        mut,
-        constraint = trader_usdt_account.owner == trader_wallet && trader_usdt_account.mint == usdt_mint.key()
-            @ VaultError::InvalidTokenAccount,
-    )]
-    pub trader_usdt_account: Box<Account<'info, TokenAccount>>,
+    /// Pays the claim account's rent. A sector program passes a signer it
+    /// controls (typically the same payer it uses for `deposit_fee`).
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
-    /// Classic SPL Token only.
-    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
-/// Checks the challenge, then books one payout against its cap.
+/// Checks the challenge, then books one payout against its cap and records it
+/// as a `PayoutClaim` owed to the trader. **No tokens move here**: a heartbeat
+/// cycle (`settle_claims`) pays claims later, pro rata.
 ///
 /// If the challenge is past its inactivity window, this flips it to
-/// `Abandoned` and returns **Ok with `PayoutOutcome::Abandoned`**, paying
-/// nothing. It must not return an error here: a failed transaction reverts
-/// every write, so the `Abandoned` status would never be stored. The sector
-/// program must read the return data before telling anyone they were paid.
+/// `Abandoned` and returns **Ok with `PayoutOutcome::Abandoned`**, creating no
+/// claim. It must not return an error here: a failed transaction reverts every
+/// write, so the `Abandoned` status would never be stored. The sector program
+/// must read the return data before telling anyone a payout was queued.
 ///
-/// Otherwise the payout is paid in tokens from exactly ONE pool: the pool
-/// (USDC or USDT) with the larger balance, USDC on a tie, straight to the
-/// trader's own account for that mint. It is never split across pools, never
-/// falls back to the smaller pool, and never sums the two: if the larger pool
-/// holds less than `amount` the call fails with `InsufficientPoolBalance` and
-/// every write reverts. Reserve floors are not consulted (they only bind the
-/// future admin withdrawal). The pool is a PDA-owned token account, so the
-/// transfer is signed with the `VaultState` seeds. The single transfer CPI is
-/// the last thing the handler does.
+/// Otherwise (`PayoutOutcome::Paid`, meaning "accepted and queued") the claim is
+/// created with `owed = amount`, and `open_claims_count` / `open_claims_total`
+/// grow. The claim is created last, after every check, by hand (see
+/// `payout_claim`).
 pub fn request_payout(
     ctx: Context<RequestPayout>,
-    _trader_wallet: Pubkey,
+    trader_wallet: Pubkey,
     amount: u64,
-    _product_program_id: Pubkey,
+    product_program_id: Pubkey,
     _challenge_id: u64,
     proposed_request_id: u64,
 ) -> Result<()> {
@@ -126,12 +112,9 @@ pub fn request_payout(
     let expected_request_id = ts.payout_count.checked_add(1).ok_or(VaultError::MathOverflow)?;
     require!(proposed_request_id == expected_request_id, VaultError::RequestIdMismatch);
 
-    // One pool only: the larger; a tie goes to USDC.
-    let usdc_balance = ctx.accounts.usdc_pool.amount;
-    let usdt_balance = ctx.accounts.usdt_pool.amount;
-    let from_usdc = usdc_balance >= usdt_balance;
-    let pool_balance = if from_usdc { usdc_balance } else { usdt_balance };
-    require!(pool_balance >= amount, VaultError::InsufficientPoolBalance);
+    let vs = &mut ctx.accounts.vault_state;
+    let open_claims_count = vs.open_claims_count.checked_add(1).ok_or(VaultError::MathOverflow)?;
+    let open_claims_total = vs.open_claims_total.checked_add(amount).ok_or(VaultError::MathOverflow)?;
 
     ts.payout_count = expected_request_id;
     ts.touch(now, paused_now);
@@ -144,45 +127,52 @@ pub fn request_payout(
         ts.status = TraderStatus::Graduated;
     }
 
-    let a = &ctx.accounts;
-    if from_usdc {
-        transfer_from_pool(&a.usdc_pool, &a.usdc_mint, &a.trader_usdc_account, &a.vault_state, &a.token_program, amount)?;
-    } else {
-        transfer_from_pool(&a.usdt_pool, &a.usdt_mint, &a.trader_usdt_account, &a.vault_state, &a.token_program, amount)?;
-    }
+    vs.open_claims_count = open_claims_count;
+    vs.open_claims_total = open_claims_total;
+
+    let claim = PayoutClaim {
+        trader_wallet,
+        trader_state: ts.key(),
+        product_program_id,
+        request_id: proposed_request_id,
+        owed: amount,
+        created_in_cycle: vs.cycle_id,
+        last_settled_cycle: 0,
+        bump: ctx.bumps.payout_claim,
+    };
+    create_claim_account(
+        &ctx.accounts.payer,
+        &ctx.accounts.payout_claim,
+        &ctx.accounts.system_program,
+        &claim,
+        ts.key(),
+    )?;
 
     set_return_data(&[PayoutOutcome::Paid as u8]);
     Ok(())
 }
 
-/// pool -> trader, signed by the `VaultState` PDA (the pool's token
-/// authority). `transfer_checked` enforces the mint's decimals.
-fn transfer_from_pool<'info>(
-    pool: &Account<'info, TokenAccount>,
-    mint: &Account<'info, Mint>,
-    to: &Account<'info, TokenAccount>,
-    vault_state: &Account<'info, VaultState>,
-    token_program: &Program<'info, Token>,
-    amount: u64,
+/// Creates the claim account (safe against a pre-funded address) and writes
+/// the Anchor discriminator plus the Borsh data.
+fn create_claim_account<'info>(
+    payer: &Signer<'info>,
+    payout_claim: &UncheckedAccount<'info>,
+    system_program: &Program<'info, System>,
+    claim: &PayoutClaim,
+    trader_state: Pubkey,
 ) -> Result<()> {
-    let seeds: &[&[u8]] = &[
-        VAULT_STATE_SEED,
-        SL8_ADMIN_PUBKEY.as_ref(),
-        ROV_ADMIN_PUBKEY.as_ref(),
-        &[vault_state.bump],
-    ];
-    token::transfer_checked(
-        CpiContext::new_with_signer(
-            token_program.to_account_info(),
-            TransferChecked {
-                from: pool.to_account_info(),
-                mint: mint.to_account_info(),
-                to: to.to_account_info(),
-                authority: vault_state.to_account_info(),
-            },
-            &[seeds],
-        ),
-        amount,
-        mint.decimals,
-    )
+    let id = claim.request_id.to_le_bytes();
+    let bump = [claim.bump];
+    create_pda_account(
+        &payer.to_account_info(),
+        &payout_claim.to_account_info(),
+        &system_program.to_account_info(),
+        PayoutClaim::SPACE,
+        &crate::ID,
+        &[PAYOUT_CLAIM_SEED, trader_state.as_ref(), &id, &bump],
+    )?;
+
+    let mut data = payout_claim.try_borrow_mut_data()?;
+    let mut out: &mut [u8] = &mut data;
+    claim.try_serialize(&mut out)
 }

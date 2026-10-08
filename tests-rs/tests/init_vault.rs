@@ -28,6 +28,11 @@ fn creates_vault_state_and_both_pools() {
     assert_eq!(vs.usdt_pool, pool_pda(&e.vault, &e.usdt));
     assert_eq!(vs.sl8_wallet, core_vault::constants::SL8_ADMIN_PUBKEY);
     assert_eq!((vs.usdc_floor, vs.usdt_floor, vs.floor_updated_at), (0, 0, 0));
+    // payout queue and heartbeat cycle start empty
+    assert_eq!((vs.open_claims_count, vs.open_claims_total), (0, 0));
+    assert_eq!((vs.cycle_id, vs.cycle_started_at, vs.cycle_active), (0, 0, false));
+    assert_eq!((vs.cycle_owed_snapshot, vs.cycle_available_snapshot), (0, 0));
+    assert_eq!((vs.cycle_eligible_count, vs.cycle_processed_count), (0, 0));
     let (_, bump) = Pubkey::find_program_address(
         &[
             b"vault_state",

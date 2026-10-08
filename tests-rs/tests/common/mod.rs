@@ -24,8 +24,9 @@ use anchor_spl::token::spl_token::{
 use solana_account::Account as RawAccount;
 use core_vault::{
     errors::VaultError,
-    state::{ProductRegistry, TraderState},
+    state::{PayoutClaim, ProductRegistry, TraderState},
 };
+use std::cell::RefCell;
 use litesvm::{
     types::{TransactionMetadata, TransactionResult},
     LiteSVM,
@@ -172,6 +173,9 @@ pub struct Env {
     pub wallets: HashMap<Pubkey, WalletTok>,
     /// Every token account this env created or knows about, for balance snapshots.
     pub tracked: Vec<Pubkey>,
+    /// Every PayoutClaim address a payout instruction was ever built for (the
+    /// candidates for `open_claims`); filled by `payout_ix`.
+    pub claim_addrs: RefCell<Vec<Pubkey>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +267,7 @@ impl Env {
             sl8_usdt: Pubkey::default(),
             wallets: HashMap::new(),
             tracked: vec![],
+            claim_addrs: RefCell::new(vec![]),
         };
         env.tracked.extend([env.usdc_pool, env.usdt_pool]);
         for k in [env.sl8.pubkey(), env.rov.pubkey(), env.payer.pubkey()] {
@@ -492,16 +497,8 @@ impl Env {
     pub fn flag(&mut self, s: &Sector, w: &Pubkey, id: u64) {
         self.ok(flag_ix(s, w, id));
     }
-    /// Successful payout. Tops the USDC pool up to at least `amount` first (a
-    /// test shortcut: the older tests care about request ids and statuses, not
-    /// about pool liquidity). Tests about liquidity set pools explicitly with
-    /// `set_pool` and send `payout_ix` themselves.
+    /// Successful `request_payout` (queues a claim; no tokens move).
     pub fn payout(&mut self, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64) -> TransactionMetadata {
-        self.fund_wallet(w);
-        let have = self.token_balance(&self.usdc_pool.clone());
-        if have < amount {
-            self.set_pool(Coin::Usdc, amount);
-        }
         let ix = payout_ix(self, s, w, id, amount, req);
         self.ok(ix)
     }
@@ -540,10 +537,54 @@ impl Env {
             .set_account(s.registry(), RawAccount { data, ..old })
             .unwrap();
     }
+    /// Rewrites the VaultState account's data directly (to build states, such as
+    /// a mid-cycle vault, that need instructions this suite does not call).
+    pub fn set_vault_state(&mut self, f: impl FnOnce(&mut core_vault::state::VaultState)) {
+        let mut vs = self.vault_state();
+        f(&mut vs);
+        let old = self.svm.get_account(&self.vault).unwrap();
+        let mut data = Vec::with_capacity(old.data.len());
+        anchor_lang::AccountSerialize::try_serialize(&vs, &mut data).unwrap();
+        assert_eq!(data.len(), old.data.len());
+        self.svm.set_account(self.vault, RawAccount { data, ..old }).unwrap();
+    }
     pub fn registry(&self, s: &Sector) -> ProductRegistry {
         let a = self.svm.get_account(&s.registry()).expect("registry account");
         assert_eq!(a.owner, core_vault::ID);
         ProductRegistry::try_deserialize(&mut a.data.as_slice()).unwrap()
+    }
+    /// The claim at `addr`, if a live PayoutClaim account exists there.
+    pub fn claim_at(&self, addr: &Pubkey) -> Option<PayoutClaim> {
+        let a = self.svm.get_account(addr)?;
+        if a.data.is_empty() || a.owner != core_vault::ID {
+            return None;
+        }
+        Some(PayoutClaim::try_deserialize(&mut a.data.as_slice()).unwrap())
+    }
+    pub fn claim(&self, s: &Sector, w: &Pubkey, id: u64, req: u64) -> PayoutClaim {
+        self.claim_at(&claim_key(s, w, id, req)).expect("payout claim account")
+    }
+    pub fn claim_opt(&self, s: &Sector, w: &Pubkey, id: u64, req: u64) -> Option<PayoutClaim> {
+        self.claim_at(&claim_key(s, w, id, req))
+    }
+    /// Every open claim among the addresses payout instructions were built for.
+    pub fn open_claims(&self) -> Vec<(Pubkey, PayoutClaim)> {
+        self.claim_addrs
+            .borrow()
+            .iter()
+            .filter_map(|a| self.claim_at(a).map(|c| (*a, c)))
+            .collect()
+    }
+    /// CLAIM INVARIANT: the vault's counters match the claim accounts that exist.
+    pub fn assert_claim_invariant(&self) {
+        let claims = self.open_claims();
+        let vs = self.vault_state();
+        let total: u64 = claims.iter().map(|(_, c)| c.owed).sum();
+        assert_eq!(vs.open_claims_total, total, "open_claims_total != sum of owed");
+        assert_eq!(vs.open_claims_count, claims.len() as u64, "open_claims_count != number of claims");
+        for (_, c) in &claims {
+            assert!(c.owed > 0, "a claim with owed == 0 must have been closed");
+        }
     }
     pub fn trader(&self, s: &Sector, w: &Pubkey, id: u64) -> TraderState {
         self.trader_opt(s, w, id).expect("trader_state account")
@@ -776,48 +817,45 @@ pub fn flag_ix(s: &Sector, w: &Pubkey, id: u64) -> Instruction {
     )
 }
 
-/// request_payout: 0 auth, 1 registry, 2 trader_state, then the appended
-/// token accounts.
+/// request_payout account positions: 0 auth, 1 registry, 2 trader_state, then
+/// the appended payout-queue accounts.
 #[derive(Clone, Copy)]
 pub struct PayoutSlots {
+    pub trader_state: usize,
     pub vault: usize,
-    pub usdc_mint: usize,
-    pub usdt_mint: usize,
-    pub usdc_pool: usize,
-    pub usdt_pool: usize,
-    pub trader_usdc: usize,
-    pub trader_usdt: usize,
-    pub token_program: usize,
+    pub claim: usize,
+    pub payer: usize,
+    pub system: usize,
 }
-pub const PO: PayoutSlots = PayoutSlots {
-    vault: 3,
-    usdc_mint: 4,
-    usdt_mint: 5,
-    usdc_pool: 6,
-    usdt_pool: 7,
-    trader_usdc: 8,
-    trader_usdt: 9,
-    token_program: 10,
-};
+pub const PO: PayoutSlots = PayoutSlots { trader_state: 2, vault: 3, claim: 4, payer: 5, system: 6 };
 
-/// The wallet must already have token accounts (`fund_wallet`, which every
-/// `deposit*` helper does).
+pub fn claim_pda(trader_state: &Pubkey, req: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"payout_claim", trader_state.as_ref(), &req.to_le_bytes()], &core_vault::ID)
+}
+pub fn claim_key(s: &Sector, w: &Pubkey, id: u64, req: u64) -> Pubkey {
+    claim_pda(&s.trader(w, id), req).0
+}
+
+/// request_payout. `e.payer` pays the claim's rent. No token accounts: nothing
+/// moves until a heartbeat cycle settles the claim.
 pub fn payout_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64) -> Instruction {
-    let t = e.wallet_tok(w);
+    let claim = claim_key(s, w, id, req);
+    {
+        let mut v = e.claim_addrs.borrow_mut();
+        if !v.contains(&claim) {
+            v.push(claim);
+        }
+    }
     si::request_payout(
         core_vault::ID,
         s.authority,
         s.registry(),
         &[
             AccountMeta::new(s.trader(w, id), false),
-            AccountMeta::new_readonly(e.vault, false),
-            AccountMeta::new_readonly(e.usdc, false),
-            AccountMeta::new_readonly(e.usdt, false),
-            AccountMeta::new(e.usdc_pool, false),
-            AccountMeta::new(e.usdt_pool, false),
-            AccountMeta::new(t.usdc, false),
-            AccountMeta::new(t.usdt, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(e.vault, false),
+            AccountMeta::new(claim, false),
+            AccountMeta::new(e.payer.pubkey(), true),
+            sys(),
         ],
         si::RequestPayoutArgs {
             trader_wallet: *w,

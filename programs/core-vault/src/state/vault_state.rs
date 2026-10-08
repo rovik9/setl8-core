@@ -12,11 +12,33 @@ pub struct VaultState {
     pub usdt_pool: Pubkey,
     /// Owner of the SL8-side destination token accounts (`SL8_ADMIN_PUBKEY`).
     pub sl8_wallet: Pubkey,
-    /// Pool floors; written by the Module 3 heartbeat. Zero and unused until
-    /// then.
+    /// Pool floors; written when a heartbeat cycle finalizes. Zero until then.
     pub usdc_floor: u64,
     pub usdt_floor: u64,
     pub floor_updated_at: i64,
+
+    // ---- payout queue ----
+    /// Number of open `PayoutClaim` accounts.
+    pub open_claims_count: u64,
+    /// Sum of `owed` over all open claims (6-decimal dollar units).
+    pub open_claims_total: u64,
+
+    // ---- heartbeat cycle ----
+    /// Id of the most recently BEGUN cycle; 0 = none yet.
+    pub cycle_id: u64,
+    /// Start time of that cycle; 0 = never started. The minimum gap between
+    /// cycles is measured from here.
+    pub cycle_started_at: i64,
+    pub cycle_active: bool,
+    /// `open_claims_total` when the cycle began.
+    pub cycle_owed_snapshot: u64,
+    /// USDC pool + USDT pool balance when the cycle began.
+    pub cycle_available_snapshot: u64,
+    /// `open_claims_count` when the cycle began: how many claims must be
+    /// processed before the cycle may finalize.
+    pub cycle_eligible_count: u64,
+    pub cycle_processed_count: u64,
+
     pub bump: u8,
 }
 
@@ -26,6 +48,15 @@ impl VaultState {
         + 8 // usdc_floor
         + 8 // usdt_floor
         + 8 // floor_updated_at
+        + 8 // open_claims_count
+        + 8 // open_claims_total
+        + 8 // cycle_id
+        + 8 // cycle_started_at
+        + 1 // cycle_active
+        + 8 // cycle_owed_snapshot
+        + 8 // cycle_available_snapshot
+        + 8 // cycle_eligible_count
+        + 8 // cycle_processed_count
         + 1; // bump
 
     /// The pool token account for `mint`, if `mint` is one of the vault's.

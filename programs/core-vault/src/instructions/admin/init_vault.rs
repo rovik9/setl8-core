@@ -1,11 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_pack::Pack;
-use anchor_lang::system_program;
 use anchor_spl::token::{self, spl_token, InitializeAccount3, Token};
 
 use crate::constants::{POOL_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TOKEN_DECIMALS, VAULT_STATE_SEED};
 use crate::errors::VaultError;
 use crate::state::VaultState;
+use crate::utils::create_pda_account;
 
 #[derive(Accounts)]
 pub struct InitVault<'info> {
@@ -85,6 +85,15 @@ pub fn init_vault(ctx: Context<InitVault>, usdc_mint: Pubkey, usdt_mint: Pubkey)
     vs.usdc_floor = 0;
     vs.usdt_floor = 0;
     vs.floor_updated_at = 0;
+    vs.open_claims_count = 0;
+    vs.open_claims_total = 0;
+    vs.cycle_id = 0;
+    vs.cycle_started_at = 0;
+    vs.cycle_active = false;
+    vs.cycle_owed_snapshot = 0;
+    vs.cycle_available_snapshot = 0;
+    vs.cycle_eligible_count = 0;
+    vs.cycle_processed_count = 0;
     vs.bump = ctx.bumps.vault_state;
     Ok(())
 }
@@ -99,13 +108,8 @@ fn validate_mint(info: &AccountInfo) -> Result<()> {
 }
 
 /// Creates `pool` (a PDA of this program) as a token account for `mint` with
-/// `authority` as its token owner.
-///
-/// Handles an already-funded address: anyone can send lamports to a
-/// predictable PDA address, and `create_account` refuses an address that holds
-/// lamports. Without the fallback below, one dust transfer to a pool address
-/// would brick `init_vault` permanently (the `VaultState` PDA is fixed).
-#[allow(clippy::too_many_arguments)]
+/// `authority` as its token owner. The pre-funded-address handling lives in
+/// `create_pda_account`.
 fn create_pool<'info>(
     payer: &Signer<'info>,
     pool: &UncheckedAccount<'info>,
@@ -115,49 +119,14 @@ fn create_pool<'info>(
     system_program: &Program<'info, System>,
     pool_seeds: &[&[u8]],
 ) -> Result<()> {
-    let space = spl_token::state::Account::LEN;
-    let required = Rent::get()?.minimum_balance(space);
-    let have = pool.lamports();
-    let signer: &[&[&[u8]]] = &[pool_seeds];
-
-    if have == 0 {
-        system_program::create_account(
-            CpiContext::new_with_signer(
-                system_program.to_account_info(),
-                system_program::CreateAccount { from: payer.to_account_info(), to: pool.to_account_info() },
-                signer,
-            ),
-            required,
-            space as u64,
-            &token::ID,
-        )?;
-    } else {
-        if required > have {
-            system_program::transfer(
-                CpiContext::new(
-                    system_program.to_account_info(),
-                    system_program::Transfer { from: payer.to_account_info(), to: pool.to_account_info() },
-                ),
-                required - have,
-            )?;
-        }
-        system_program::allocate(
-            CpiContext::new_with_signer(
-                system_program.to_account_info(),
-                system_program::Allocate { account_to_allocate: pool.to_account_info() },
-                signer,
-            ),
-            space as u64,
-        )?;
-        system_program::assign(
-            CpiContext::new_with_signer(
-                system_program.to_account_info(),
-                system_program::Assign { account_to_assign: pool.to_account_info() },
-                signer,
-            ),
-            &token::ID,
-        )?;
-    }
+    create_pda_account(
+        &payer.to_account_info(),
+        &pool.to_account_info(),
+        &system_program.to_account_info(),
+        spl_token::state::Account::LEN,
+        &token::ID,
+        pool_seeds,
+    )?;
 
     token::initialize_account3(CpiContext::new(
         token_program.to_account_info(),

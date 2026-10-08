@@ -1,4 +1,5 @@
-//! request_payout: books one payout against the cap (no token movement yet).
+//! request_payout: books one payout against the cap and queues it as a PayoutClaim
+//! (no tokens move; see payout_claims.rs for the claim itself).
 mod common;
 use anchor_lang::error::ErrorCode;
 use anchor_lang::solana_program::pubkey::Pubkey;

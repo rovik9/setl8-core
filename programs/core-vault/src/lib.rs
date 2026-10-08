@@ -138,8 +138,9 @@ pub mod core_vault {
         instructions::record_activity(ctx, trader_wallet, product_program_id, challenge_id)
     }
 
-    /// Books one payout against the challenge cap and pays it from the larger
-    /// payout pool. See `instructions::sector::request_payout`.
+    /// Books one payout against the challenge cap and queues it as a
+    /// `PayoutClaim`; no tokens move (a heartbeat cycle pays it later). See
+    /// `instructions::sector::request_payout`.
     pub fn request_payout(
         ctx: Context<RequestPayout>,
         trader_wallet: Pubkey,

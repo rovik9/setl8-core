@@ -18,3 +18,8 @@ pub const VAULT_STATE_SEED: &[u8] = b"vault_state";
 /// Seed for the two payout-pool token accounts: `[POOL_SEED, vault_state,
 /// mint]`. Their token authority is the `VaultState` PDA.
 pub const POOL_SEED: &[u8] = b"pool";
+
+/// Seed for a `PayoutClaim` PDA: `[PAYOUT_CLAIM_SEED, trader_state_key,
+/// request_id.to_le_bytes()]`. One claim per accepted `request_payout`; the
+/// request id is unique per challenge, so a claim address is never reused.
+pub const PAYOUT_CLAIM_SEED: &[u8] = b"payout_claim";
