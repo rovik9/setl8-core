@@ -35,3 +35,49 @@ pub const BOND_CAP_SEED: &[u8] = b"bond_cap";
 /// `[BOND_CLAIM_SEED, depositor, deposit_index.to_le_bytes()]`. A position is
 /// closed by the request, so its index (and this address) is used exactly once.
 pub const BOND_CLAIM_SEED: &[u8] = b"bond_claim";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PDA is derived from the CONCATENATION of its seeds (no separators). Two PDA
+    /// types whose seeds have the same total length could in principle alias each
+    /// other, and a variable-length part would blur the boundary inside one type. Every
+    /// part after the literal is fixed width (a `Pubkey` is 32 bytes, a `u64` 8), so the
+    /// total length identifies the type. This fails if a new or renamed seed makes two
+    /// totals equal. (docs/SECURITY-REVIEW.md, class 3.)
+    #[test]
+    fn pda_seed_lengths_are_pairwise_distinct() {
+        const KEY: usize = 32;
+        const U64: usize = 8;
+        let totals: [(&str, usize); 8] = [
+            ("product_registry", PRODUCT_REGISTRY_SEED.len() + KEY),
+            ("trader_state", TRADER_STATE_SEED.len() + KEY + KEY + U64),
+            ("vault_state", VAULT_STATE_SEED.len() + KEY + KEY),
+            ("pool", POOL_SEED.len() + KEY + KEY),
+            ("payout_claim", PAYOUT_CLAIM_SEED.len() + KEY + U64),
+            ("bond", BOND_SEED.len() + KEY + U64),
+            ("bond_cap", BOND_CAP_SEED.len() + KEY),
+            ("bond_claim", BOND_CLAIM_SEED.len() + KEY + U64),
+        ];
+        for (i, (a, la)) in totals.iter().enumerate() {
+            for (b, lb) in totals.iter().skip(i + 1) {
+                assert_ne!(la, lb, "{a} and {b} PDAs would have the same total seed length ({la})");
+            }
+        }
+        // the figures quoted in docs/SECURITY-REVIEW.md
+        let lens: Vec<usize> = totals.iter().map(|t| t.1).collect();
+        assert_eq!(lens, vec![48, 84, 75, 68, 52, 44, 40, 50]);
+    }
+
+    /// Solana limits one seed to 32 bytes; the literals are far below it.
+    #[test]
+    fn every_literal_seed_fits_the_per_seed_limit() {
+        for s in [
+            PRODUCT_REGISTRY_SEED, TRADER_STATE_SEED, VAULT_STATE_SEED, POOL_SEED, PAYOUT_CLAIM_SEED, BOND_SEED,
+            BOND_CAP_SEED, BOND_CLAIM_SEED,
+        ] {
+            assert!(s.len() <= 32);
+        }
+    }
+}

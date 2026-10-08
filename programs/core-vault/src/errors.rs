@@ -3,9 +3,10 @@ use anchor_lang::prelude::*;
 #[error_code]
 pub enum VaultError {
     /// CPI-caller identity check failed: the `sector_authority` signer
-    /// passed to `deposit_fee` / `request_payout` / `flag_trader_failed`
-    /// doesn't match `derive_sector_authority(&registry.product_program_id)`
-    /// for the registry being called against.
+    /// passed to a sector instruction (`deposit_fee`, `deposit_reset`,
+    /// `record_activity`, `request_payout`, `flag_trader_failed`) doesn't match
+    /// `derive_sector_authority(&registry.product_program_id)` for the registry
+    /// being called against.
     #[msg("sector_authority does not match the registered product's derived CPI authority")]
     Unauthorized,
 
@@ -20,19 +21,16 @@ pub enum VaultError {
     #[msg("both sl8_admin and rov_admin must sign and match the configured admin pubkeys")]
     MissingMultisigSignature,
 
-    /// Reserved: Anchor's `init` constraint on `ProductRegistry` already
-    /// rejects a second registration for the same `product_program_id` at
-    /// the runtime level (account already in use) before this instruction's
-    /// body runs, so this variant is currently unreachable in Module 1.
-    /// Kept because the brief calls for it explicitly — flag if a future
-    /// module needs to replace `init` with an explicit existence check that
-    /// would actually return this.
+    /// Reserved, never returned: Anchor's `init` constraint on `ProductRegistry`
+    /// already rejects a second registration for the same `product_program_id`
+    /// (system "account already in use") before the handler runs. Kept, not
+    /// deleted, because removing a variant renumbers every later error code
+    /// (6000 + index), which every client and test decodes.
     #[msg("a product with this product_program_id is already registered")]
     ProductAlreadyRegistered,
 
-    /// Not in the brief's "at minimum" list — added because `ProductRegistry`
-    /// has fixed on-chain space sized off `MAX_CHALLENGE_SIZES`
-    /// (constants.rs); without this guard, passing more tiers than that
+    /// `ProductRegistry` has fixed on-chain space sized off
+    /// `MAX_CHALLENGE_SIZES`; without this guard, passing more tiers than that
     /// bound would fail confusingly deep in Borsh serialization instead of
     /// with a clear instruction-level error.
     #[msg("challenge_sizes exceeds MAX_CHALLENGE_SIZES")]
@@ -68,7 +66,7 @@ pub enum VaultError {
     #[msg("product is already paused")]
     ProductAlreadyPaused,
 
-    #[msg("payout amount must be greater than zero")]
+    #[msg("amount must be greater than zero")]
     ZeroAmount,
 
     #[msg("arithmetic overflow")]
@@ -128,9 +126,10 @@ pub enum VaultError {
     #[msg("the payout_tally account is not the product's canonical payout-tally address")]
     InvalidTally,
 
-    /// Reserved: `BondTerm` is a Borsh enum, so an unknown term never reaches the
-    /// handler (instruction-data deserialization fails first). Kept as the named
-    /// error for any future non-enum entry point.
+    /// Reserved, never returned: `BondTerm` is a Borsh enum, so an unknown term
+    /// never reaches the handler (instruction-data deserialization fails first).
+    /// Kept as the named error for any future non-enum entry point, and so the
+    /// numbering of the errors after it stays stable.
     #[msg("not a valid bond term")]
     BondTermInvalid,
 

@@ -3,9 +3,9 @@ use setl8_shared_interfaces::ChallengeSize;
 
 use crate::constants::{CHALLENGE_SIZE_SPACE, MAX_CHALLENGE_SIZES, MAX_RESET_PHASES, PAUSE_NONE};
 
-/// One per registered sector program (lev-trading, options, ...). Extends
-/// the Module 1 scope only as far as registration/config; trader-state and
-/// fund-movement fields land in later modules.
+/// One per registered sector program (lev-trading, options, ...): its
+/// configuration, its pause state and the request counters that
+/// `reconcile_product` compares with the sector's payout tally.
 #[account]
 pub struct ProductRegistry {
     /// The sector program's own on-chain program ID. This is what

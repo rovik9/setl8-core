@@ -27,6 +27,8 @@ pub struct PayoutClaim {
     /// destinations `settle_claims` accepts).
     pub trader_wallet: Pubkey,
     pub trader_state: Pubkey,
+    /// Informational (never read back): the sector for a trader claim, the default
+    /// key for a bond claim.
     pub product_program_id: Pubkey,
     /// The `payout_count` this claim was booked under (unique per challenge).
     pub request_id: u64,

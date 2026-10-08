@@ -42,11 +42,16 @@ The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's
 
 | Account | Seeds | Holds |
 |---|---|---|
-| `VaultState` | `["vault_state", SL8_ADMIN, ROV_ADMIN]` | USDC/USDT mints, pool addresses |
-| Pool token account | `["pool", vault_state, mint]` | The USDC / USDT funds |
-| `ProductRegistry` | `["product_registry", product_program_id]` | Per-sector config and `active` flag |
-| `TraderState` | per wallet + product + challenge | Trader status, activity clock, reset history |
-| `PayoutClaim` | `["payout_claim", trader_state, request_id]` | An amount owed to a trader, until a heartbeat cycle pays it |
+| `VaultState` | `["vault_state", SL8_ADMIN, ROV_ADMIN]` | USDC/USDT mints and pool addresses, `sl8_wallet`, reserve floors, the open-claim counters, the bond totals, the marketing-withdrawal totals and the heartbeat cycle state |
+| Pool token account | `["pool", vault_state, mint]` | The USDC / USDT funds (authority = `vault_state`) |
+| `ProductRegistry` | `["product_registry", product_program_id]` | Per-sector config, `active` flag and pause fields, and the request counters reconciliation uses |
+| `TraderState` | `["trader_state", product_program_id, trader_wallet, challenge_id (u64 LE)]` | Trader status, activity clock, reset history |
+| `PayoutClaim` (kind 0, trader) | `["payout_claim", trader_state, request_id (u64 LE)]` | An amount owed to a trader, until a heartbeat cycle pays it |
+| `PayoutClaim` (kind 1, bond) | `["bond_claim", depositor, deposit_index (u64 LE)]` | An amount owed to a bond holder after `request_bond_payout` |
+| `BondPosition` | `["bond", depositor, deposit_index (u64 LE)]` | One open bond; closed by `request_bond_payout` |
+| `BondCapTracker` | `["bond_cap", depositor]` | A wallet's open principal and its next deposit index |
+
+Every PDA type has a different total seed length (40 to 84 bytes), so no two types can collide; a unit test guards this.
 
 ## Repository layout
 
@@ -110,13 +115,15 @@ scripts/test-all.sh               # everything below, stops at the first failure
 3. `cargo test --manifest-path tests-rs/Cargo.toml`, the LiteSVM integration suite;
 4. `scripts/test-ts.sh`, the TypeScript suite on a validator loaded with the test `.so`.
 
+`tests-rs` also holds `invariants_fuzz.rs`, a seeded model-based random-sequence tester (30 fixed seeds x 400 steps in the normal run; an `#[ignore]`d 20 x 5,000-step run: `cargo test --manifest-path tests-rs/Cargo.toml --test invariants_fuzz -- --ignored fuzz_long --nocapture`; replay one seed with `FUZZ_SEED=<n> ... fuzz_one`). It compares the real program with an independent model after every step and asserts global invariants (token conservation, counters vs accounts, caps, cycle state machine, rent, no state change on any rejected call). `compute_budget.rs` measures every instruction's compute units.
+
 `tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and the payout queue with its pro-rata heartbeat settlement. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
 
 Don't use plain `anchor test`: it would load the real-key build, which the suite cannot sign for.
 
 ## Bonds
 
-Anyone can lock USDC or USDT in a bond for a fixed term and earn interest at maturity. No admin key can touch bond money, and the product-level pause does not apply to bonds.
+Anyone can lock USDC or USDT in a bond for a fixed term and earn interest at maturity. No admin instruction can change, close or redirect a bond or its claim, and the product-level pause does not apply to bonds. One caveat, the single documented exception below: bond principal sits in the payout pools (half of it; SL8 receives the other half at deposit), and the two admins together can withdraw up to 75% of a pool's live balance with no deduction for bond liabilities (see [Security model](#security-model-and-the-one-known-exception)).
 
 | Term | Length | Hard lock | Interest (only at maturity) |
 |---|---|---|---|
@@ -147,7 +154,7 @@ The vault and each sector program keep independent books of the same thing: how 
 
 ## Security model and the one known exception
 
-The design rule is **no admin key on money**: the admins configure products and pause or resume them, but cannot move pool funds, change a claim, or touch a bond. There is exactly one documented exception, `admin_withdraw_marketing_funds`.
+The design rule is **no admin key on money**: the admins configure products and pause or resume them, but cannot change a claim, edit a bond or send money anywhere but SL8's own token account. There is exactly one documented exception, `admin_withdraw_marketing_funds`, which does move pool funds to SL8's account.
 
 **What the two admins can do.** Together (both signatures, SL8 and Rov), they can move up to **75% of one pool's live balance** to the SL8 wallet's token account.
 
@@ -170,10 +177,16 @@ The design rule is **no admin key on money**: the admins configure products and 
 
 Every withdrawal logs the pool, the amount, the withdrawable amount and the reserve, and the vault keeps cumulative totals (`marketing_withdrawn_usdc`, `marketing_withdrawn_usdt`).
 
+## Security documentation
+
+- [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md): the instruction-by-instruction review, the 13 hunted bug classes, the findings list (`SR-xx`) and the compute table. Internal review, **not an audit**. The most serious open item is **SR-21** (high): one huge `request_payout` can lock every bond exit; a tested fix is in [`docs/proposed-fixes/`](docs/proposed-fixes/) and waits for a decision.
+- [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md): assets, actors, trust assumptions, attack trees, and what each compromise can do.
+- [`docs/DEPLOY-CHECKLIST.md`](docs/DEPLOY-CHECKLIST.md): devnet then mainnet, upgrade-authority handling, keeper duties, monitoring, incident steps.
+
 ## Design notes
 
-- **Minimal money surface.** Only `deposit_fee`, `deposit_reset` (tokens in) and `settle_claims` (tokens out) move tokens. `request_payout` only records a claim.
-- **Settlement batches.** `settle_claims` takes at most `MAX_SETTLE_BATCH = 6` claims per call: a full batch is 1,106 bytes (limit 1,232) and about 125,000 compute units (about 235,000 for wallets ground to make the token-account derivation expensive), so add a `SetComputeUnitLimit` of 400,000. Any single claim can always be settled alone. `tests-rs/tests/settle_batch.rs` measures all of this.
+- **Minimal money surface.** Tokens move in only in `deposit_fee`, `deposit_reset` and `deposit_bond`, and out only in `settle_claims` and the documented-exception `admin_withdraw_marketing_funds`. `request_payout` and `request_bond_payout` only record a claim.
+- **Settlement batches.** `settle_claims` takes at most `MAX_SETTLE_BATCH = 6` claims per call: a full batch is 1,106 bytes (limit 1,232) and about 122,000 compute units (about 242,000 for wallets ground to make the token-account derivation expensive; one claim alone is under 45,000), so add a `SetComputeUnitLimit` of 400,000. Any single claim can always be settled alone. `tests-rs/tests/settle_batch.rs` measures all of this.
 - **Unusable destinations are skipped, wrong ones are errors.** A claim whose associated token accounts are missing, frozen, re-owned, or of the wrong mint is skipped and stays owed forever. Passing an address that is not the trader's associated token account reverts the whole transaction.
 - **Stale paths return `Ok`.** An inactivity timeout has to persist the `Abandoned` state, so the stale path of `record_activity` and `request_payout` returns success plus return data (`ActivityOutcome` / `PayoutOutcome`) instead of an error, which would roll the state change back.
 - **Fee split is validated.** `fee_split_bps` above 10,000 is rejected in `register_product` and `update_product_config`.

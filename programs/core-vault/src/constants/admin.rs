@@ -24,7 +24,7 @@ use anchor_lang::prelude::*;
 
 /// SL8's half of the 2-of-2 admin multisig required on every privileged vault
 /// instruction (`init_vault`, `register_product`, `update_product_config`,
-/// `pause_product`, `reactivate_product`).
+/// `pause_product`, `reactivate_product`, `admin_withdraw_marketing_funds`).
 ///
 /// REAL key: founder-held, hardware/phone wallet. Must never be a funds
 /// destination except SL8 as `sl8_wallet` (see the open decision in the module

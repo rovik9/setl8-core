@@ -23,9 +23,10 @@ pub struct ReactivateProduct<'info> {
 
 /// Flips `active = true` on an existing, previously-paused registry entry.
 /// Deliberately does nothing else: no reset of `total_requests_emitted`, no
-/// reconciliation run. Per the brief, reactivation is a manual-review
-/// decision, not a fresh start — heartbeat reconciliation (Module 3+) picks
-/// back up against whatever counts were already there.
+/// reconciliation run. Reactivation is a manual-review decision, not a fresh
+/// start: the next `reconcile_product` compares the sector's tally with
+/// whatever counts were already there, and pauses the product again if they
+/// still disagree. Idempotent on an already-active product.
 pub fn reactivate_product(ctx: Context<ReactivateProduct>, _product_program_id: Pubkey) -> Result<()> {
     // `resume` also banks the time spent paused so trader inactivity clocks
     // skip it.

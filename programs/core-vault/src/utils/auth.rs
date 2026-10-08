@@ -6,8 +6,8 @@ use setl8_shared_interfaces::derive_sector_authority;
 use crate::errors::VaultError;
 
 /// The core CPI-auth security invariant shared by every inbound
-/// sector-program call (`deposit_fee`, `request_payout`,
-/// `flag_trader_failed`).
+/// sector-program call (`deposit_fee`, `deposit_reset`, `record_activity`,
+/// `request_payout`, `flag_trader_failed`).
 ///
 /// A PDA can only be signed via `invoke_signed` by the program it was
 /// derived from. So a valid signature from `sector_authority` here —

@@ -60,7 +60,8 @@ pub fn request_bond_payout(ctx: Context<RequestBondPayout>, deposit_index: u64) 
     let position = read_position(&ctx.accounts.bond_position, &depositor, deposit_index)?;
     let mut tracker = read_tracker(&ctx.accounts.bond_cap_tracker, &depositor)?;
 
-    // Interest and the lock come from the position's own copy, never from constants.
+    // The interest rate comes from the position's own copy (frozen at deposit). The lock and
+    // maturity come from `position.term` via the BOND_*_LOCK_SECS / BOND_*_TERM_SECS constants.
     let now = Clock::get()?.unix_timestamp;
     let plan = plan_withdrawal(position.principal, position.interest_bps, position.term, position.created_at, now)?;
     require!(plan.net > 0, VaultError::ZeroAmount);

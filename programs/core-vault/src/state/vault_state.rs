@@ -23,6 +23,7 @@ pub struct VaultState {
     /// Pool floors; written when a heartbeat cycle finalizes. Zero until then.
     pub usdc_floor: u64,
     pub usdt_floor: u64,
+    /// Time of the last `finalize_heartbeat`. Informational: never read on-chain.
     pub floor_updated_at: i64,
 
     // ---- payout queue ----

@@ -1,0 +1,336 @@
+diff --git a/programs/core-vault/src/constants/limits.rs b/programs/core-vault/src/constants/limits.rs
+index 2e0f65c..3f36d7a 100644
+--- a/programs/core-vault/src/constants/limits.rs
++++ b/programs/core-vault/src/constants/limits.rs
+@@ -70,3 +70,28 @@ pub const BOND_9M_TERM_SECS: i64 = 23_328_000;
+ /// Hard lock of the nine-month bond: half the term (135 days).
+ pub const BOND_9M_LOCK_SECS: i64 = 11_664_000;
+ pub const BOND_9M_INTEREST_BPS: u16 = 3_000;
++
++/// Hard ceiling on `VaultState::open_claims_total` (the sum owed on every open claim)
++/// that `request_payout` enforces: 2^62 base units (about 4.6 trillion coins, far above
++/// all USDC and USDT in existence). Its job is arithmetic headroom, not policy: the
++/// counter is a `u64` and a sector chooses each amount, so without a ceiling one huge
++/// request makes every later `checked_add` overflow, which locks bond withdrawals too.
++/// Bond claims are NOT subject to it (they cannot be refused without locking bond
++/// holders in) and always fit above it: all open bonds are capped at
++/// `BOND_GLOBAL_CAP` principal, so their claims total at most 1.3 x that.
++pub const MAX_OPEN_CLAIMS_TOTAL: u64 = 1 << 62;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_claims_ceiling_leaves_room_for_every_bond_the_caps_allow() {
++        // the sector fills to the ceiling, then every allowed bond is withdrawn at
++        // maturity with the larger (30%) interest: the sum must still fit in a u64
++        let bond_claims = BOND_GLOBAL_CAP as u128 * 130 / 100;
++        assert!((MAX_OPEN_CLAIMS_TOTAL as u128) + bond_claims < u64::MAX as u128);
++        assert_eq!(MAX_OPEN_CLAIMS_TOTAL, 4_611_686_018_427_387_904);
++    }
++}
++
+diff --git a/programs/core-vault/src/errors.rs b/programs/core-vault/src/errors.rs
+index 6329774..841a8ba 100644
+--- a/programs/core-vault/src/errors.rs
++++ b/programs/core-vault/src/errors.rs
+@@ -161,4 +161,12 @@ pub enum VaultError {
+     /// is the only guard on the amount. See the README's security model.
+     #[msg("withdrawal exceeds what the pool's 25% reserve leaves available")]
+     WithdrawalExceedsReserve,
++    /// `request_payout` would take `VaultState::open_claims_total` above
++    /// `MAX_OPEN_CLAIMS_TOTAL` (2^62 base units, far more than all the stablecoin that
++    /// exists). Without this bound one request of about `u64::MAX` saturates the
++    /// counter, and every later `request_bond_payout` and `request_payout` then fails
++    /// with `MathOverflow`: bond holders could not exit. Appended last so no earlier
++    /// error code moves.
++    #[msg("this request would take the vault's open claims above the hard ceiling")]
++    ClaimsCeilingExceeded,
+ }
+diff --git a/programs/core-vault/src/instructions/sector/request_payout.rs b/programs/core-vault/src/instructions/sector/request_payout.rs
+index c5e4d72..3c1d5b1 100644
+--- a/programs/core-vault/src/instructions/sector/request_payout.rs
++++ b/programs/core-vault/src/instructions/sector/request_payout.rs
+@@ -3,8 +3,8 @@ use anchor_lang::solana_program::program::set_return_data;
+ use setl8_shared_interfaces::PayoutOutcome;
+ 
+ use crate::constants::{
+-    PAYOUT_CLAIM_SEED, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED,
+-    VAULT_STATE_SEED,
++    MAX_OPEN_CLAIMS_TOTAL, PAYOUT_CLAIM_SEED, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY,
++    TRADER_STATE_SEED, VAULT_STATE_SEED,
+ };
+ use crate::errors::VaultError;
+ use crate::state::{CLAIM_KIND_TRADER, PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
+@@ -82,6 +82,11 @@ pub struct RequestPayout<'info> {
+ /// and the product's `total_requests_emitted` / `total_requested_amount` (the
+ /// numbers `reconcile_product` compares with the sector's tally) grow too. The claim is created last, after every check, by hand (see
+ /// `payout_claim`).
++///
++/// Checks, in order (the stale path returns `Ok` before the cap and id checks): product
++/// active, `amount > 0`, status `Active`, stale -> `Abandoned`, `payout_count <
++/// max_payout_count`, `proposed_request_id == payout_count + 1`, **`amount` fits under
++/// `MAX_OPEN_CLAIMS_TOTAL` (`ClaimsCeilingExceeded`)**, then the checked additions.
+ pub fn request_payout(
+     ctx: Context<RequestPayout>,
+     trader_wallet: Pubkey,
+@@ -114,6 +119,14 @@ pub fn request_payout(
+     require!(proposed_request_id == expected_request_id, VaultError::RequestIdMismatch);
+ 
+     let vs = &mut ctx.accounts.vault_state;
++    // Headroom guard: a sector chooses `amount`, and `open_claims_total` is a u64 that
++    // `request_bond_payout` also adds to. Without a ceiling one request of about u64::MAX
++    // makes every later checked add overflow and locks the bond holders in. Written so
++    // it cannot itself overflow (`saturating_sub`, no addition).
++    require!(
++        amount <= MAX_OPEN_CLAIMS_TOTAL.saturating_sub(vs.open_claims_total),
++        VaultError::ClaimsCeilingExceeded
++    );
+     let open_claims_count = vs.open_claims_count.checked_add(1).ok_or(VaultError::MathOverflow)?;
+     let open_claims_total = vs.open_claims_total.checked_add(amount).ok_or(VaultError::MathOverflow)?;
+ 
+diff --git a/tests-rs/tests/invariants_fuzz.rs b/tests-rs/tests/invariants_fuzz.rs
+index 8c4d075..9f0c1f3 100644
+--- a/tests-rs/tests/invariants_fuzz.rs
++++ b/tests-rs/tests/invariants_fuzz.rs
+@@ -92,6 +92,8 @@ const BOND_MIN: u64 = 50_000_000;
+ const BOND_WALLET_CAP: u64 = 50_000_000_000;
+ const BOND_GLOBAL_CAP: u64 = 600_000_000_000;
+ const D: i64 = 86_400;
++/// request_payout refuses to take the open claims above this (SR-21): 2^62 base units.
++const CLAIMS_CEILING: u64 = 1 << 62;
+ 
+ fn term_secs(t: BondTerm) -> (i64, i64, u64) {
+     // (term, hard lock, interest bps)
+@@ -688,7 +690,11 @@ impl Model {
+                     if *req != t.payout_count + 1 {
+                         return Err(vec![ev(VaultError::RequestIdMismatch)]);
+                     }
+-                    if self.claims_total() + *amount as u128 > u64::MAX as u128 || pr.amount as u128 + *amount as u128 > u64::MAX as u128 {
++                    // the ceiling guard comes before the checked additions
++                    if *amount as u128 > (CLAIMS_CEILING as u128).saturating_sub(self.claims_total()) {
++                        return Err(vec![ev(VaultError::ClaimsCeilingExceeded)]);
++                    }
++                    if pr.amount as u128 + *amount as u128 > u64::MAX as u128 {
+                         return Err(vec![ev(VaultError::MathOverflow)]);
+                     }
+                     let tm = m.traders.get_mut(&(*s, *p, *cid)).unwrap();
+@@ -877,10 +883,9 @@ impl Model {
+                 let gross = if age >= term { b.principal + floor_bps(b.principal, bps) } else { b.principal };
+                 let fee = ceil_bps(gross, 20);
+                 let net = gross - fee;
+-                // the claim is added to open_claims_total with a checked add
+-                if self.claims_total() + net as u128 > u64::MAX as u128 {
+-                    return Err(vec![ev(VaultError::MathOverflow)]);
+-                }
++                // No overflow branch on purpose: the claims ceiling leaves headroom for every bond
++                // claim, so a MathOverflow here would be a bug and shows up as "model says
++                // success, chain failed" (invariant 13).
+                 let principal = b.principal;
+                 m.trackers.get_mut(p).unwrap().open -= principal;
+                 m.bonds.remove(&(*p, *idx));
+@@ -1200,6 +1205,16 @@ impl Fuzz {
+     }
+     fn payout_amount(&mut self) -> u64 {
+         let pt = self.m.pools[0] + self.m.pools[1];
++        if self.step > 30 && self.rng.pct(3) {
++            // a sector bug or hostile sector: huge amounts, and amounts right at the claims ceiling
++            let room = (CLAIMS_CEILING as u128).saturating_sub(self.m.claims_total()) as u64;
++            return match self.rng.below(4) {
++                0 => u64::MAX - self.rng.below(50),
++                1 => room,
++                2 => room.saturating_add(1),
++                _ => CLAIMS_CEILING / 2,
++            };
++        }
+         match self.rng.below(12) {
+             0 => 0,
+             1 => 1,
+@@ -1211,13 +1226,7 @@ impl Fuzz {
+             7 => self.rng.range(1_000_000, 1_000_000_000),
+             8 => 123_456_789,
+             9 => self.rng.range(1, 5_000),
+-            10 => {
+-                if self.rng.pct(8) {
+-                    u64::MAX - self.rng.below(50)
+-                } else {
+-                    pt / 10 + 1
+-                }
+-            }
++            10 => pt / 10 + 1,
+             _ => self.rng.range(1, pt.max(2)),
+         }
+     }
+@@ -1619,8 +1628,16 @@ impl Fuzz {
+                 }
+                 if self.rng.pct(35) {
+                     // lowering the cap under an Active trader that already got paid: PayoutCapReached
+-                    let paid: Vec<u64> = self.m.traders.iter().filter(|((ts, _, _), t)| *ts == s && t.status == St::Active && t.payout_count >= 1).map(|(_, t)| t.payout_count).collect();
+-                    cfg.max_payout = if paid.is_empty() { 1 } else { *self.rng.pick(&paid) };
++                    let paid: Vec<((usize, usize, u64), u64)> =
++                        self.m.traders.iter().filter(|((ts, _, _), t)| *ts == s && t.status == St::Active && t.payout_count >= 1).map(|(k, t)| (*k, t.payout_count)).collect();
++                    if paid.is_empty() {
++                        cfg.max_payout = 1;
++                    } else {
++                        let ((ts, tp, tc), count) = *self.rng.pick(&paid);
++                        cfg.max_payout = count;
++                        // ... and immediately ask that trader for another payout (if the update succeeds)
++                        self.queue.push_back(Act::Payout { s: ts, p: tp, cid: tc, amount: 1_000, req: count + 1 });
++                    }
+                 }
+                 Act::Update { s, cfg }
+             }
+@@ -2220,6 +2237,9 @@ impl Fuzz {
+                 }
+                 if out == Out::Payout(PayoutOutcome::Paid) {
+                     t.push("payout:queued".into());
++                    if new.claims_total() >= CLAIMS_CEILING as u128 {
++                        t.push("payout:filled_to_the_ceiling".into());
++                    }
+                 }
+             }
+             Act::Record { .. } => t.push(format!("record:{:?}", out)),
+@@ -2895,6 +2915,7 @@ const REQUIRED_TAGS: &[&str] = &[
+     "payout:stale_abandoned",
+     "payout:graduated",
+     "payout:queued",
++    "payout:filled_to_the_ceiling",
+     "record:Activity(Recorded)",
+     "record:Activity(Throttled)",
+     "record:Activity(Abandoned)",
+@@ -2925,6 +2946,7 @@ const REQUIRED_CODES: &[&str] = &[
+     "deposit_reset:6001", "deposit_reset:6007", "deposit_reset:6011", "deposit_reset:6012", "deposit_reset:0",
+     "record_activity:6005", "flag_trader_failed:6005", "mark_abandoned:6005", "mark_abandoned:6010",
+     "request_payout:6001", "request_payout:6005", "request_payout:6008", "request_payout:6009", "request_payout:6015",
++    "request_payout:6043",
+     "begin_heartbeat:6025", "begin_heartbeat:6027",
+     "settle_claims:6026", "settle_claims:6029", "settle_claims:6030", "settle_claims:6031", "settle_claims:6032",
+     "settle_claims:6033", "settle_claims:6021",
+diff --git a/tests-rs/tests/payout_claims.rs b/tests-rs/tests/payout_claims.rs
+index 9e29ded..b81aa92 100644
+--- a/tests-rs/tests/payout_claims.rs
++++ b/tests-rs/tests/payout_claims.rs
+@@ -86,12 +86,19 @@ fn counters_track_every_claim_across_traders_and_requests() {
+ 
+ #[test]
+ fn the_total_cannot_overflow_u64() {
++    // SR-21: the total can no longer be driven anywhere near u64::MAX by a single sector
++    // request. This test used to ACCEPT `u64::MAX - 5` (which locked every bond exit and
++    // every other request with MathOverflow); it now pins that the ceiling refuses it and
++    // that the counter stops exactly at the ceiling.
+     let (mut e, s, w) = rig(5);
+-    e.payout(&s, &w, 1, u64::MAX - 5, 1);
++    let ix = payout_ix(&e, &s, &w, 1, u64::MAX - 5, 1);
++    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::ClaimsCeilingExceeded));
++    let ceiling = core_vault::constants::MAX_OPEN_CLAIMS_TOTAL;
++    e.payout(&s, &w, 1, ceiling - 5, 1);
+     let ix = payout_ix(&e, &s, &w, 1, 6, 2);
+-    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::MathOverflow));
+-    e.payout(&s, &w, 1, 5, 2); // exactly u64::MAX in total is fine
+-    assert_eq!(e.vault_state().open_claims_total, u64::MAX);
++    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::ClaimsCeilingExceeded));
++    e.payout(&s, &w, 1, 5, 2); // exactly the ceiling in total is fine
++    assert_eq!(e.vault_state().open_claims_total, ceiling);
+ }
+ 
+ #[test]
+diff --git a/tests-rs/tests/claims_ceiling.rs b/tests-rs/tests/claims_ceiling.rs
+new file mode 100644
+index 0000000..da5c747
+--- /dev/null
++++ b/tests-rs/tests/claims_ceiling.rs
+@@ -0,0 +1,93 @@
++//! SR-21: `request_payout` used to accept any `u64` amount, so one request of ~u64::MAX
++//! (a sector bug or a malicious sector) saturated `open_claims_total` and from then on
++//! every `request_bond_payout` and every other `request_payout` failed with
++//! `MathOverflow`: bond holders could not exit. The vault now refuses a request that would
++//! take `open_claims_total` above `MAX_OPEN_CLAIMS_TOTAL` (2^62), which leaves ample
++//! headroom for bond claims (their total is bounded by ~$780K = 7.8e11 base units).
++mod common;
++use common::*;
++use core_vault::constants::{BOND_6M_LOCK_SECS, BOND_GLOBAL_CAP};
++use core_vault::errors::VaultError;
++use core_vault::state::BondTerm;
++use solana_signer::Signer;
++
++const M: u64 = 1_000_000;
++/// Hard-coded on purpose: the test pins the figure, not the constant's name.
++const CEILING: u64 = 1 << 62;
++
++fn rig() -> (Env, Sector) {
++    Env::registered(&Cfg { max_payout: 9, ..Cfg::default() })
++}
++
++#[test]
++fn a_request_near_u64_max_is_rejected_and_changes_nothing() {
++    let (mut e, s) = rig();
++    let w = wallet();
++    e.deposit(&s, &w, 1);
++    let ix = payout_ix(&e, &s, &w, 1, u64::MAX - 5, 1); // registers the claim address for the digest
++    let before = e.digest();
++    let reg = e.registry(&s);
++    assert_vault_err(&e.send(ix), VaultError::ClaimsCeilingExceeded);
++    assert_eq!(e.digest(), before, "a rejected request changes nothing");
++    assert_eq!(e.registry(&s).total_requests_emitted, reg.total_requests_emitted);
++    assert_eq!(e.trader(&s, &w, 1).payout_count, 0);
++}
++
++#[test]
++fn bond_holders_can_still_exit_after_a_hostile_request() {
++    let (mut e, s) = rig();
++    let k = e.new_depositor();
++    e.make_atas(&k.pubkey());
++    e.bond_deposit(&k, 0, 100 * M, BondTerm::SixMonths, Coin::Usdc);
++    let w = wallet();
++    e.deposit(&s, &w, 1);
++    // the hostile / buggy request is refused ...
++    let ix = payout_ix(&e, &s, &w, 1, u64::MAX - 5, 1);
++    assert_vault_err(&e.send(ix), VaultError::ClaimsCeilingExceeded);
++    // ... so the bond holder can withdraw
++    e.advance(BOND_6M_LOCK_SECS);
++    e.bond_request(&k, 0);
++    assert_eq!(e.bond_claim_opt(&k.pubkey(), 0).unwrap().owed, 100 * M - 200_000);
++    e.assert_claim_invariant();
++}
++
++#[test]
++fn exactly_the_ceiling_is_accepted_one_more_is_not_and_bonds_still_fit_on_top() {
++    let (mut e, s) = rig();
++    let (w1, w2) = (wallet(), wallet());
++    e.deposit(&s, &w1, 1);
++    e.deposit(&s, &w2, 1);
++    e.payout(&s, &w1, 1, CEILING, 1);
++    assert_eq!(e.vault_state().open_claims_total, CEILING);
++    let ix = payout_ix(&e, &s, &w2, 1, 1, 1);
++    assert_vault_err(&e.send(ix), VaultError::ClaimsCeilingExceeded);
++    // a bond holder can still exit with the claims sitting AT the ceiling
++    let k = e.new_depositor();
++    e.make_atas(&k.pubkey());
++    e.bond_deposit(&k, 0, 100 * M, BondTerm::SixMonths, Coin::Usdc);
++    e.advance(BOND_6M_LOCK_SECS);
++    e.bond_request(&k, 0);
++    assert_eq!(e.vault_state().open_claims_total, CEILING + 100 * M - 200_000);
++    e.assert_claim_invariant();
++}
++
++#[test]
++fn the_ceiling_leaves_room_for_every_bond_the_caps_allow() {
++    // worst case: the sector fills to the ceiling, then EVERY allowed bond is withdrawn at
++    // maturity with 30% interest (the 9-month rate)
++    let bond_claims = BOND_GLOBAL_CAP as u128 * 130 / 100;
++    assert!(CEILING as u128 + bond_claims < u64::MAX as u128);
++}
++
++#[test]
++fn a_request_below_the_ceiling_still_works_for_another_product() {
++    let (mut e, s) = rig();
++    let s2 = Sector::new();
++    e.register(&s2, &Cfg::default());
++    let (w1, w2) = (wallet(), wallet());
++    e.deposit(&s, &w1, 1);
++    e.deposit(&s2, &w2, 1);
++    e.payout(&s, &w1, 1, CEILING - 10, 1);
++    e.payout(&s2, &w2, 1, 10, 1); // exactly fills it
++    assert_eq!(e.vault_state().open_claims_total, CEILING);
++}

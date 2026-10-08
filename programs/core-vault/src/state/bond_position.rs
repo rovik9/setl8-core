@@ -49,6 +49,8 @@ pub struct BondPosition {
     /// From the depositor's `BondCapTracker`; never reused.
     pub deposit_index: u64,
     /// Which stablecoin the bond is in (and so which payout pool took the pool share).
+    /// Informational: the program never reads it back, and settlement is
+    /// mint-agnostic (the larger pool pays any claim, topped up from the other).
     pub mint: Pubkey,
     pub principal: u64,
     pub term: BondTerm,

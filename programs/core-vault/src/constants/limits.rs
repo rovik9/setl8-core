@@ -22,10 +22,8 @@ pub const PAUSE_RECONCILIATION_DEFICIT: u8 = 2;
 
 /// Upper bound on how many `ChallengeSize` tiers a single `ProductRegistry`
 /// can hold, used only to size the account's fixed on-chain space (Anchor
-/// accounts can't be unbounded). Not specified anywhere in the Module 1
-/// brief — **flagged assumption, confirm before Module 2**: raising this
-/// later requires a account-migration (realloc), so pick deliberately rather
-/// than inheriting this default.
+/// accounts can't be unbounded). Raising this later requires an account
+/// migration (realloc), so it is a deliberate, fixed choice.
 pub const MAX_CHALLENGE_SIZES: usize = 32;
 
 /// On-chain size of one Borsh-serialized `ChallengeSize` (`size: u64, cost:

@@ -8,12 +8,14 @@
 //! |- lib.rs            the program: one thin wrapper per instruction, grouped by caller
 //! |- constants/        seeds, admin keys, limits, token constants
 //! |- errors.rs         VaultError
-//! |- state/            on-chain accounts: VaultState, ProductRegistry, TraderState
+//! |- state/            on-chain accounts: VaultState, ProductRegistry, TraderState,
+//! |                    PayoutClaim, BondPosition, BondCapTracker
 //! |- instructions/     one file per instruction (Accounts struct + handler)
 //! |  |- admin/             2-of-2 admin multisig
 //! |  |- sector/            registered sector programs, via CPI
 //! |  `- permissionless/    anyone
-//! `- utils/            shared helpers: CPI-auth check, payment splitting
+//! `- utils/            shared helpers: CPI-auth check, payment splitting, settlement and
+//!                      bond arithmetic, reconciliation, the marketing reserve, PDA creation
 //! ```
 //!
 //! Instruction names are exact snake_case matches to what `setl8-shared-interfaces`
