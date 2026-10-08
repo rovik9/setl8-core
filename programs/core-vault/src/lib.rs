@@ -31,7 +31,7 @@ pub mod state;
 pub mod utils;
 
 use instructions::*;
-use state::BondTerm;
+use state::{BondTerm, PoolSide};
 
 declare_id!("2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft");
 
@@ -90,6 +90,18 @@ pub mod core_vault {
 
     pub fn reactivate_product(ctx: Context<ReactivateProduct>, product_program_id: Pubkey) -> Result<()> {
         instructions::reactivate_product(ctx, product_program_id)
+    }
+
+    /// DOCUMENTED EXCEPTION to "no admin key on money": both admins together move up to
+    /// 75% of one pool's live balance (25% reserve) to the SL8 wallet's token account,
+    /// with no deduction for claims or bonds. See
+    /// `instructions::admin::admin_withdraw_marketing_funds` and the README's security model.
+    pub fn admin_withdraw_marketing_funds(
+        ctx: Context<AdminWithdrawMarketingFunds>,
+        pool: PoolSide,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::admin_withdraw_marketing_funds(ctx, pool, amount)
     }
 
     // ---- Sector-program instructions (CPI from a registered sector program, `sector_authority` PDA signer) ----

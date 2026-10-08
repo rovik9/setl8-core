@@ -32,7 +32,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 
 | Group | Instructions | Authority |
 |---|---|---|
-| `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product` | Both admin signatures (SL8 + Rov) |
+| `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product`, `admin_withdraw_marketing_funds` | Both admin signatures (SL8 + Rov) |
 | `sector/` | `deposit_fee`, `deposit_reset`, `record_activity`, `request_payout`, `flag_trader_failed` | A registered sector program via CPI, authenticated by its `sector_authority` PDA |
 | `permissionless/` | `mark_abandoned`, `reconcile_product`, `deposit_bond`, `request_bond_payout`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
 
@@ -58,11 +58,12 @@ programs/core-vault/src/
   state/              on-chain accounts: vault_state, product_registry, trader_state, payout_claim,
                       bond_position, bond_cap_tracker
   instructions/       one file per instruction (Accounts struct + handler)
-    admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product
+    admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product,
+                        admin_withdraw_marketing_funds
     sector/             deposit_fee, deposit_reset, record_activity, request_payout, flag_trader_failed
     permissionless/     mark_abandoned, reconcile_product, deposit_bond, request_bond_payout, begin_heartbeat, settle_claims, finalize_heartbeat
   utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers),
-                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check), bond.rs (bond fees and interest),
+                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check), reserve.rs (marketing reserve), bond.rs (bond fees and interest),
                       pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tests/                Anchor TypeScript tests + admin test keypairs
@@ -143,6 +144,31 @@ The vault and each sector program keep independent books of the same thing: how 
 - **What a pause does.** `deposit_fee`, `deposit_reset` and `request_payout` fail with `ProductNotActive`, and traders' inactivity clocks freeze. Claims already queued are **still settled** by the heartbeat. Un-pausing stays 2-of-2 (`reactivate_product`).
 - **Keeper duty.** The heartbeat instructions do not call `reconcile_product`. The keeper must call it for **every product before each `begin_heartbeat`**.
 - **Known limit.** Both sides' counts only ever go up. A sector that *under*-reports can catch up and then match again after an admin reactivates it. A sector whose tally *over*-reports (it counted a request the vault never accepted) can never match again: the vault's books cannot be lowered to meet it, so every reconcile re-pauses it. Such a product is permanently unusable and must be replaced by registering a new product.
+
+## Security model and the one known exception
+
+The design rule is **no admin key on money**: the admins configure products and pause or resume them, but cannot move pool funds, change a claim, or touch a bond. There is exactly one documented exception, `admin_withdraw_marketing_funds`.
+
+**What the two admins can do.** Together (both signatures, SL8 and Rov), they can move up to **75% of one pool's live balance** to the SL8 wallet's token account.
+
+- `admin_withdraw_marketing_funds(pool, amount)` names a side (`Usdc` or `Usdt`) and an amount. Each pool is handled alone; the two are never combined.
+- Per pool, with the LIVE balance: `reserve = max(stored_floor, ceil(live * 25%))` and `withdrawable = live - reserve`. The amount must be greater than zero and at most `withdrawable`, else `ZeroAmount` or `WithdrawalExceedsReserve`.
+- The `max` is deliberate. The stored floors are 0 until the first `finalize_heartbeat`, and a plain "balance minus stored floor" would let the admins take 100% before then. The stored floor still wins whenever the balance has fallen since it was stored.
+
+**What they cannot do.**
+- Send funds anywhere but the SL8 wallet's token account for that mint. There is no destination argument and no extra account; the account is checked exactly as `deposit_fee` checks SL8's destination.
+- Take more than 75% of a pool's live balance in one call, or touch the other pool in the same call.
+- Do anything with one signature. Both must sign.
+- Change claims, bonds, caps or any trader's state.
+
+**What it deliberately does NOT protect (the exception).** By the founder's explicit choice the cap is plain "75% of the pool balance, 25% floor". There is **no deduction for open claims, bond liabilities or the current heartbeat cycle**, and the call works at any time: mid-cycle, with a product paused, and repeatedly.
+
+- The pool can hold bond principal and queued trader payouts, and the admins can still take 75% of it.
+- Repeated withdrawals shrink a pool geometrically: after `n` calls roughly `balance * 0.25^n` remains. (Exact: each call leaves `ceil(25%)` of the previous balance.)
+- Queued claims then settle pro rata against what is left. `settle_claims` already caps every payment at the live balance, so claims receive less and the unpaid remainder stays owed and carries over to later cycles. Nothing is created or lost, and nobody is paid more than they are owed, but a claim can wait a long time if the pool is drained and not refilled.
+- The withdrawal is vault-level: neither a product pause nor a reconciliation auto-pause blocks it.
+
+Every withdrawal logs the pool, the amount, the withdrawable amount and the reserve, and the vault keeps cumulative totals (`marketing_withdrawn_usdc`, `marketing_withdrawn_usdt`).
 
 ## Design notes
 

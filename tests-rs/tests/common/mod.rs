@@ -24,7 +24,7 @@ use anchor_spl::token::spl_token::{
 use solana_account::Account as RawAccount;
 use core_vault::{
     errors::VaultError,
-    state::{BondCapTracker, BondPosition, BondTerm, PayoutClaim, ProductRegistry, TraderState},
+    state::{BondCapTracker, BondPosition, BondTerm, PayoutClaim, PoolSide, ProductRegistry, TraderState},
 };
 use std::cell::RefCell;
 use litesvm::{
@@ -1145,6 +1145,58 @@ pub fn request_bond_payout_ix(e: &Env, dep: &Pubkey, idx: u64) -> Instruction {
         }
         .to_account_metas(None),
         data: core_vault::instruction::RequestBondPayout { deposit_index: idx }.data(),
+    }
+}
+
+// -------------------------------------------------------- marketing withdrawal builder
+
+/// Account positions in admin_withdraw_marketing_funds.
+#[derive(Clone, Copy)]
+pub struct WithdrawSlots {
+    pub sl8_admin: usize,
+    pub rov_admin: usize,
+    pub vault: usize,
+    pub mint: usize,
+    pub pool: usize,
+    pub sl8_ta: usize,
+    pub token_program: usize,
+}
+pub const AW: WithdrawSlots =
+    WithdrawSlots { sl8_admin: 0, rov_admin: 1, vault: 2, mint: 3, pool: 4, sl8_ta: 5, token_program: 6 };
+
+pub fn side_of(c: Coin) -> PoolSide {
+    match c {
+        Coin::Usdc => PoolSide::Usdc,
+        Coin::Usdt => PoolSide::Usdt,
+    }
+}
+
+pub fn withdraw_ix(e: &Env, c: Coin, amount: u64) -> Instruction {
+    let (mint, pool, sl8) = e.coin(c);
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::AdminWithdrawMarketingFunds {
+            sl8_admin: e.sl8.pubkey(),
+            rov_admin: e.rov.pubkey(),
+            vault_state: e.vault,
+            mint,
+            pool_token_account: pool,
+            sl8_token_account: sl8,
+            token_program: spl_token::ID,
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::AdminWithdrawMarketingFunds { pool: side_of(c), amount }.data(),
+    }
+}
+
+impl Env {
+    pub fn withdraw_result(&mut self, c: Coin, amount: u64) -> TransactionResult {
+        let ix = withdraw_ix(self, c, amount);
+        self.send(ix)
+    }
+    pub fn withdraw(&mut self, c: Coin, amount: u64) -> TransactionMetadata {
+        let r = self.withdraw_result(c, amount);
+        assert_ok(r)
     }
 }
 

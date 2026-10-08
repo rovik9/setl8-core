@@ -151,4 +151,15 @@ pub enum VaultError {
 
     #[msg("deposit_index does not match the wallet's next bond index")]
     BondIndexMismatch,
+
+    /// `admin_withdraw_marketing_funds` asked for more than the pool's withdrawable
+    /// amount: the live balance minus the larger of the stored floor and 25% of the
+    /// live balance (rounded up).
+    ///
+    /// DOCUMENTED EXCEPTION to "no admin key on money": that instruction lets the
+    /// two admins together move up to 75% of a pool to the SL8 wallet, with NO
+    /// deduction for open claims, bond liabilities or the current cycle. This error
+    /// is the only guard on the amount. See the README's security model.
+    #[msg("withdrawal exceeds what the pool's 25% reserve leaves available")]
+    WithdrawalExceedsReserve,
 }

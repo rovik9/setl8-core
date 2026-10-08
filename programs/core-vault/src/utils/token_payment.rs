@@ -4,8 +4,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
-use crate::constants::BPS_DENOMINATOR;
+use crate::constants::{BPS_DENOMINATOR, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED};
 use crate::errors::VaultError;
+use crate::state::VaultState;
 
 /// `(pool_amount, sl8_amount)` for a payment of `amount`.
 ///
@@ -69,4 +70,37 @@ impl<'a, 'info> Payment<'a, 'info> {
             self.mint.decimals,
         )
     }
+}
+
+/// pool -> `to`, signed by the `VaultState` PDA (the pool's token authority).
+/// `transfer_checked` enforces the mint's decimals. Used for every transfer OUT of a
+/// pool: claim settlement and the admin marketing withdrawal.
+pub fn transfer_from_pool<'info>(
+    vault_state: &Account<'info, VaultState>,
+    token_program: &Program<'info, Token>,
+    pool: &Account<'info, TokenAccount>,
+    mint: &Account<'info, Mint>,
+    to: &AccountInfo<'info>,
+    amount: u64,
+) -> Result<()> {
+    let seeds: &[&[u8]] = &[
+        VAULT_STATE_SEED,
+        SL8_ADMIN_PUBKEY.as_ref(),
+        ROV_ADMIN_PUBKEY.as_ref(),
+        &[vault_state.bump],
+    ];
+    token::transfer_checked(
+        CpiContext::new_with_signer(
+            token_program.to_account_info(),
+            TransferChecked {
+                from: pool.to_account_info(),
+                mint: mint.to_account_info(),
+                to: to.clone(),
+                authority: vault_state.to_account_info(),
+            },
+            &[seeds],
+        ),
+        amount,
+        mint.decimals,
+    )
 }

@@ -1,5 +1,13 @@
 use anchor_lang::prelude::*;
 
+/// Which of the vault's two payout pools an instruction means. Pools are always
+/// handled one at a time: USDC and USDT are never combined.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolSide {
+    Usdc,
+    Usdt,
+}
+
 /// Singleton vault configuration: which two stablecoins the vault accepts
 /// and where their payout pools live. One per deployment, created once by
 /// `init_vault`.
@@ -22,6 +30,12 @@ pub struct VaultState {
     pub open_claims_count: u64,
     /// Sum of `owed` over all open claims (6-decimal dollar units).
     pub open_claims_total: u64,
+
+    // ---- marketing withdrawals (informational) ----
+    /// Cumulative USDC taken by `admin_withdraw_marketing_funds`.
+    pub marketing_withdrawn_usdc: u64,
+    /// Cumulative USDT taken by `admin_withdraw_marketing_funds`.
+    pub marketing_withdrawn_usdt: u64,
 
     // ---- bond vault ----
     /// Principal across ALL open bond positions (the global cap counter).
@@ -57,6 +71,8 @@ impl VaultState {
         + 8 // floor_updated_at
         + 8 // open_claims_count
         + 8 // open_claims_total
+        + 8 // marketing_withdrawn_usdc
+        + 8 // marketing_withdrawn_usdt
         + 8 // bond_principal_open_total
         + 8 // bond_withdrawal_fees_retained
         + 8 // cycle_id
@@ -67,6 +83,28 @@ impl VaultState {
         + 8 // cycle_eligible_count
         + 8 // cycle_processed_count
         + 1; // bump
+
+    pub fn mint_of(&self, side: PoolSide) -> Pubkey {
+        match side {
+            PoolSide::Usdc => self.usdc_mint,
+            PoolSide::Usdt => self.usdt_mint,
+        }
+    }
+
+    pub fn pool_of(&self, side: PoolSide) -> Pubkey {
+        match side {
+            PoolSide::Usdc => self.usdc_pool,
+            PoolSide::Usdt => self.usdt_pool,
+        }
+    }
+
+    /// The stored reserve floor of `side` (set at `finalize_heartbeat`).
+    pub fn floor_of(&self, side: PoolSide) -> u64 {
+        match side {
+            PoolSide::Usdc => self.usdc_floor,
+            PoolSide::Usdt => self.usdt_floor,
+        }
+    }
 
     /// The pool token account for `mint`, if `mint` is one of the vault's.
     pub fn pool_for(&self, mint: &Pubkey) -> Option<Pubkey> {

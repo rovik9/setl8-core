@@ -4,6 +4,7 @@
 //! * `bond`          -- bond fees, the 50/50 principal split, lock/maturity and interest
 //! * `destination`   -- a claim's destination: associated token accounts and whether they can be paid
 //! * `reconciliation` -- reading a sector's payout tally and comparing it with the vault's books
+//! * `reserve`       -- the marketing-withdrawal reserve (max of stored floor and live 25%)
 //! * `settlement`    -- the pure pro-rata / pool-split arithmetic of a heartbeat cycle
 //! * `pda_account`   -- creating an account at a PDA address (safe against pre-funding)
 //! * `token_payment` -- splitting a payment between the payout pool and SL8, and
@@ -14,6 +15,7 @@ mod bond;
 mod destination;
 mod pda_account;
 mod reconciliation;
+mod reserve;
 mod settlement;
 mod token_payment;
 
@@ -22,5 +24,6 @@ pub use bond::*;
 pub use destination::*;
 pub use pda_account::*;
 pub use reconciliation::*;
+pub use reserve::*;
 pub use settlement::*;
 pub use token_payment::*;

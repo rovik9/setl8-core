@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
+use anchor_spl::token::{Mint, Token, TokenAccount};
 
 use crate::constants::{
     BOND_CLAIM_SEED, MAX_SETTLE_BATCH, PAYOUT_CLAIM_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED,
@@ -7,7 +7,7 @@ use crate::constants::{
 use crate::errors::VaultError;
 use crate::state::{PayoutClaim, VaultState, CLAIM_KIND_BOND, CLAIM_KIND_TRADER};
 use crate::utils::{
-    associated_token_address, close_pda_account, cycle_ratio, destination_usable, plan_settlement, write_account,
+    self, associated_token_address, close_pda_account, cycle_ratio, destination_usable, plan_settlement, write_account,
 };
 
 #[derive(Accounts)]
@@ -157,34 +157,10 @@ fn bump_one(n: u64) -> Result<u64> {
     Ok(n.checked_add(1).ok_or(VaultError::MathOverflow)?)
 }
 
-/// pool -> trader ATA, signed by the `VaultState` PDA (the pool's token
-/// authority). `transfer_checked` enforces the mint's decimals.
+/// pool -> trader ATA (see `utils::transfer_from_pool`).
 fn transfer_from_pool<'info>(a: &SettleClaims<'info>, usdc: bool, to: &AccountInfo<'info>, amount: u64) -> Result<()> {
-    let (pool, mint) = if usdc {
-        (a.usdc_pool.to_account_info(), &a.usdc_mint)
-    } else {
-        (a.usdt_pool.to_account_info(), &a.usdt_mint)
-    };
-    let seeds: &[&[u8]] = &[
-        VAULT_STATE_SEED,
-        SL8_ADMIN_PUBKEY.as_ref(),
-        ROV_ADMIN_PUBKEY.as_ref(),
-        &[a.vault_state.bump],
-    ];
-    token::transfer_checked(
-        CpiContext::new_with_signer(
-            a.token_program.to_account_info(),
-            TransferChecked {
-                from: pool,
-                mint: mint.to_account_info(),
-                to: to.clone(),
-                authority: a.vault_state.to_account_info(),
-            },
-            &[seeds],
-        ),
-        amount,
-        mint.decimals,
-    )
+    let (pool, mint) = if usdc { (&a.usdc_pool, &a.usdc_mint) } else { (&a.usdt_pool, &a.usdt_mint) };
+    utils::transfer_from_pool(&a.vault_state, &a.token_program, pool, mint, to, amount)
 }
 
 /// Decodes a claim from its account; any layout problem is `InvalidClaim`.
