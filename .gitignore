@@ -8,3 +8,14 @@ test-ledger/
 
 # Node
 /node_modules
+
+# Secrets: real keys must never enter this repo.
+# The ONLY keypairs allowed in git are the PUBLIC TEST keys in tests/fixtures/*.json
+# (sl8-admin.json, rov-admin.json). Their private halves are public by design and
+# are accepted only by the `localnet` build. Allowlist: tests/fixtures/*.json -- any
+# other keypair-like file must be ignored, not committed.
+.env
+.env.*
+*-keypair.json
+id.json
+*.pem

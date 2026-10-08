@@ -12,7 +12,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 | Tokens | classic SPL Token only, 6-decimal USDC and USDT (Token-2022 is rejected) |
 | Shared types | [`setl8-shared-interfaces`](https://github.com/rovik9/setl8-turbo) pinned at tag `v0.3.1` |
 
-> **Status: pre-audit, not deployed.** The admin keys in `constants/admin.rs` are throwaway placeholders (their keypairs are in `tests/fixtures/`). Replace them with the real admin wallets before any non-local deploy.
+> **Status: pre-audit, not deployed.** See [Keys and builds](#keys-and-builds) before building anything you intend to deploy.
 
 ## How it works
 
@@ -56,10 +56,22 @@ programs/core-vault/src/
   utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers)
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tests/                Anchor TypeScript tests + admin test keypairs
-scripts/              anchor-build-checked.sh
+scripts/              build, test and deploy-gate scripts (see below)
 vault-repo-spec.md    original spec for this repo
 setl8-architecture-update-2026-09-11.md   architecture decisions this repo follows
 ```
+
+## Keys and builds
+
+The two admin keys (SL8 and Rov) are compiled into the program as constants and are part of the `VaultState` PDA seeds.
+
+- **Real keys never enter this repo or a `.env` file.** Only the public addresses are in the source (`programs/core-vault/src/constants/admin.rs`).
+- **Default build = real pubkeys.** `anchor build` / `scripts/anchor-build-checked.sh` produce `target/deploy/core_vault.so` with the real, founder-held admin addresses.
+- **`localnet` feature = public test pubkeys.** Their private keys are committed in `tests/fixtures/`, so anyone can sign as them. That build goes to `target/test-deploy/` and is used only by the tests. It is never in `default`, and it derives different vault PDAs.
+- **Before any deploy, run `scripts/verify-deploy-build.sh`.** It builds the default program, then fails unless `target/deploy/core_vault.so` contains the raw bytes of both real addresses and neither test address. It prints the `.so` sha256.
+- `.gitignore` blocks `.env*`, `*-keypair.json`, `id.json` and `*.pem`. The only keypairs allowed in git are the public test fixtures in `tests/fixtures/*.json`.
+
+> **Open pre-deploy decision: SL8 revenue currently lands in token accounts owned by the SL8 admin key.** `init_vault` sets `sl8_wallet = SL8_ADMIN_PUBKEY`. Consider a separate treasury set via `init_vault` instead. This is deliberately unchanged so far.
 
 ## Building
 
@@ -71,20 +83,25 @@ Build with the checked script instead of plain `anchor build`:
 scripts/anchor-build-checked.sh
 ```
 
-`anchor build` exits 0 even when the SBF toolchain reports a stack-frame overflow (a function frame over 4,096 bytes), and such a program can silently corrupt memory at runtime. The script fails on that warning and prints the `.so` sha256.
+`anchor build` exits 0 even when the SBF toolchain reports a stack-frame overflow (a function frame over 4,096 bytes), and such a program can silently corrupt memory at runtime. The script fails on that warning, for both the default build and the `localnet` test build (`scripts/build-test-so.sh`), and prints each `.so` sha256.
 
 ## Testing
 
 ```bash
 npm install
-cargo test -p core-vault          # unit tests
-anchor test                       # TypeScript tests against a local validator
-
-scripts/anchor-build-checked.sh   # tests-rs loads target/deploy/core_vault.so
-cd tests-rs && cargo test         # LiteSVM integration suite (197 tests)
+scripts/test-all.sh               # everything below, stops at the first failure
 ```
 
-`tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and payouts from the larger pool. Set `CORE_VAULT_SO=/path/to/other.so` to run the suite against a different build (used for mutation testing).
+`test-all.sh` runs, in order:
+
+1. `scripts/build-test-so.sh`, which builds the `localnet` `.so` into `target/test-deploy/` (never `target/deploy/`);
+2. `cargo test -p core-vault`, with default features (real keys pinned) and with `--features localnet` (test keys pinned);
+3. `cargo test --manifest-path tests-rs/Cargo.toml`, the LiteSVM integration suite;
+4. `scripts/test-ts.sh`, the TypeScript suite on a validator loaded with the test `.so`.
+
+`tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and payouts from the larger pool. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
+
+Don't use plain `anchor test`: it would load the real-key build, which the suite cannot sign for.
 
 ## Design notes
 
