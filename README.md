@@ -10,7 +10,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 | Program ID (localnet) | `2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft` |
 | Anchor | 0.32.1 |
 | Tokens | classic SPL Token only, 6-decimal USDC and USDT (Token-2022 is rejected) |
-| Shared types | [`setl8-shared-interfaces`](https://github.com/rovik9/setl8-turbo) pinned at tag `v0.3.2` |
+| Shared types | [`setl8-shared-interfaces`](https://github.com/rovik9/setl8-turbo) pinned at tag `v0.4.0` |
 
 > **Status: pre-audit, not deployed.** See [Keys and builds](#keys-and-builds) before building anything you intend to deploy.
 

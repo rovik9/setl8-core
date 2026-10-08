@@ -47,5 +47,7 @@ anchor-spl = { version = "0.32.1", default-features = false, features = ["token"
 # pause_product, the Activity/Payout outcome enums, reset_price_bps on
 # register/update, and trader_wallet + account_size on DepositFeeArgs.
 # (idl-build was added in v0.2.1.) v0.3.1 fixed the register_product builder
-# (sl8_admin is writable: it pays the registry rent). v0.3.2 is docs-only.
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.2" }
+# (sl8_admin is writable: it pays the registry rent). v0.3.2 was docs-only.
+# v0.4.0 adds the payout-tally layout (PayoutTally, derive_payout_tally) and
+# documents the queued request_payout; no existing wire format changed.
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.0" }
