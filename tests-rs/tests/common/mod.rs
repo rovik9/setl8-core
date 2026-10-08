@@ -1418,3 +1418,56 @@ pub fn oracle_settle(claims: &[u64], pools: &mut (u64, u64)) -> Vec<(u64, u64)> 
         })
         .collect()
 }
+
+// ------------------------------------------------------- fuzz / invariant helpers
+// Generic building blocks of the seeded model-based tester (invariants_fuzz.rs).
+
+use std::hash::{Hash, Hasher};
+
+/// Every non-executable account in the SVM as (address, owner, lamports, data).
+/// Reads LiteSVM's public account map, so NOTHING is missed (a claim created at an
+/// unexpected address would show up here).
+pub fn scan_accounts(svm: &LiteSVM) -> Vec<(Pubkey, Pubkey, u64, Vec<u8>)> {
+    use solana_account::ReadableAccount;
+    let mut v: Vec<_> = svm
+        .accounts_db()
+        .inner
+        .iter()
+        .filter(|(_, a)| !a.executable())
+        .map(|(k, a)| (*k, *a.owner(), a.lamports(), a.data().to_vec()))
+        .collect();
+    v.sort_by_key(|x| x.0);
+    v
+}
+
+/// A cheap fingerprint of every account whose state a rejected instruction must
+/// not change: everything that is not a sysvar or a program, minus `exclude`
+/// (the fee payer, who really does pay the fee of a failed transaction).
+pub fn state_fingerprint(svm: &LiteSVM, exclude: &[Pubkey]) -> BTreeMap<Pubkey, u64> {
+    let sysvar_owner = anchor_lang::prelude::pubkey!("Sysvar1111111111111111111111111111111111111");
+    let mut m = BTreeMap::new();
+    for (k, owner, lamports, data) in scan_accounts(svm) {
+        if owner == sysvar_owner || exclude.contains(&k) {
+            continue;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (owner, lamports, &data).hash(&mut h);
+        m.insert(k, h.finish());
+    }
+    m
+}
+
+/// Replaces every occurrence of account `from` in the instruction by `to`
+/// (keeping each slot's signer / writable flags).
+pub fn swap_account(ix: &mut Instruction, from: &Pubkey, to: &Pubkey) {
+    for m in ix.accounts.iter_mut() {
+        if m.pubkey == *from {
+            m.pubkey = *to;
+        }
+    }
+}
+
+/// Clears the signer flag of account slot `slot`.
+pub fn unsign_slot(ix: &mut Instruction, slot: usize) {
+    ix.accounts[slot].is_signer = false;
+}
