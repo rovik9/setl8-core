@@ -13,6 +13,11 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
+# Swaps the two admin pubkeys for the PUBLIC TEST keys whose private halves are
+# committed in tests/fixtures/. NEVER in `default`: a plain `anchor build` must
+# produce the real-key (deployable) program. Test builds go to a different
+# output dir -- see scripts/build-test-so.sh and scripts/verify-deploy-build.sh.
+localnet = []
 # Forwarded to setl8-shared-interfaces so its `ChallengeSize` gets a real
 # `anchor_lang::IdlBuild` impl during `anchor build`'s IDL-generation pass.
 # That crate has zero anchor-lang dependency otherwise, by design (see its

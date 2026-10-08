@@ -9,7 +9,7 @@ description = "Dev-only LiteSVM integration tests for core-vault. Not an Anchor 
 [workspace]
 
 [dev-dependencies]
-core-vault = { path = "../programs/core-vault", features = ["no-entrypoint"] }
+core-vault = { path = "../programs/core-vault", features = ["no-entrypoint", "localnet"] }
 setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.3.1" }
 anchor-lang = "0.32.1"
 litesvm = "=0.7.0"

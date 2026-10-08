@@ -51,6 +51,30 @@ pub const TOKEN_2022_ID: Pubkey =
 pub const T0: i64 = 1_700_000_000;
 pub const DAY: i64 = 86_400;
 
+/// The program under test must embed the same admin keys this crate was compiled
+/// with (the `localnet` test keys). A real-key `.so` (e.g. `target/deploy/`, or a
+/// `CORE_VAULT_SO` pointed at the wrong build) would otherwise fail every admin
+/// test with a confusing `MissingMultisigSignature`; fail loudly here instead.
+fn assert_so_has_these_admin_keys(so: &std::path::Path) {
+    use std::sync::OnceLock;
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| {
+        let bytes = std::fs::read(so).unwrap_or_else(|e| panic!("cannot read {} ({e})", so.display()));
+        let has = |k: &Pubkey| bytes.windows(32).any(|w| w == k.as_ref());
+        for (name, k) in [
+            ("SL8_ADMIN_PUBKEY", core_vault::constants::SL8_ADMIN_PUBKEY),
+            ("ROV_ADMIN_PUBKEY", core_vault::constants::ROV_ADMIN_PUBKEY),
+        ] {
+            assert!(
+                has(&k),
+                "{} does not contain {name} {k}: this is not the localnet (test-key) build -- \
+                 build it with scripts/build-test-so.sh (never test against target/deploy/)",
+                so.display()
+            );
+        }
+    });
+}
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
@@ -204,12 +228,16 @@ impl Env {
 
     fn build(sigverify: bool) -> Self {
         let mut svm = LiteSVM::new().with_sigverify(sigverify);
-        // CORE_VAULT_SO lets a mutation-testing run point at a different build.
+        // Default: the LOCALNET (public test keys) build, which lives apart from the
+        // real-key build in target/deploy/. CORE_VAULT_SO overrides it (mutation
+        // testing, or demonstrating the drift failure against another build).
         let so = std::env::var_os("CORE_VAULT_SO")
             .map(PathBuf::from)
-            .unwrap_or_else(|| root().join("target/deploy/core_vault.so"));
-        svm.add_program_from_file(core_vault::ID, &so)
-            .unwrap_or_else(|e| panic!("cannot load {} ({e:?}) -- run `anchor build` first", so.display()));
+            .unwrap_or_else(|| root().join("target/test-deploy/core_vault.so"));
+        assert_so_has_these_admin_keys(&so);
+        svm.add_program_from_file(core_vault::ID, &so).unwrap_or_else(|e| {
+            panic!("cannot load {} ({e:?}) -- run scripts/build-test-so.sh first", so.display())
+        });
         let mut clock: Clock = svm.get_sysvar();
         clock.unix_timestamp = T0;
         svm.set_sysvar(&clock);
