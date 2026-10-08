@@ -62,3 +62,24 @@ pub fn create_pda_account<'info>(
         )
     }
 }
+
+/// `create_pda_account` followed by writing `value` (Anchor discriminator plus
+/// Borsh data) into the new account.
+pub fn create_pda_account_with<'info, T: AccountSerialize>(
+    payer: &AccountInfo<'info>,
+    new_account: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    space: usize,
+    seeds: &[&[u8]],
+    value: &T,
+) -> Result<()> {
+    create_pda_account(payer, new_account, system_program, space, &crate::ID, seeds)?;
+    write_account(new_account, value)
+}
+
+/// Writes `value` (discriminator plus data) into an existing program-owned account.
+pub fn write_account<T: AccountSerialize>(info: &AccountInfo, value: &T) -> Result<()> {
+    let mut data = info.try_borrow_mut_data()?;
+    let mut out: &mut [u8] = &mut data;
+    value.try_serialize(&mut out)
+}

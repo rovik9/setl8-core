@@ -34,7 +34,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 |---|---|---|
 | `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product` | Both admin signatures (SL8 + Rov) |
 | `sector/` | `deposit_fee`, `deposit_reset`, `record_activity`, `request_payout`, `flag_trader_failed` | A registered sector program via CPI, authenticated by its `sector_authority` PDA |
-| `permissionless/` | `mark_abandoned`, `reconcile_product`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
+| `permissionless/` | `mark_abandoned`, `reconcile_product`, `deposit_bond`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
 
 The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's on-chain identity against the `ProductRegistry` and never trusts a self-reported program ID.
 
@@ -55,13 +55,14 @@ programs/core-vault/src/
   lib.rs              the program: one thin wrapper per instruction, grouped by who calls it
   constants/          seeds.rs  admin.rs  limits.rs  tokens.rs
   errors.rs           VaultError
-  state/              on-chain accounts: vault_state, product_registry, trader_state, payout_claim
+  state/              on-chain accounts: vault_state, product_registry, trader_state, payout_claim,
+                      bond_position, bond_cap_tracker
   instructions/       one file per instruction (Accounts struct + handler)
     admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product
     sector/             deposit_fee, deposit_reset, record_activity, request_payout, flag_trader_failed
-    permissionless/     mark_abandoned, reconcile_product, begin_heartbeat, settle_claims, finalize_heartbeat
+    permissionless/     mark_abandoned, reconcile_product, deposit_bond, begin_heartbeat, settle_claims, finalize_heartbeat
   utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers),
-                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check),
+                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check), bond.rs (bond fees and interest),
                       pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tests/                Anchor TypeScript tests + admin test keypairs
@@ -111,6 +112,20 @@ scripts/test-all.sh               # everything below, stops at the first failure
 `tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and the payout queue with its pro-rata heartbeat settlement. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
 
 Don't use plain `anchor test`: it would load the real-key build, which the suite cannot sign for.
+
+## Bonds
+
+Anyone can lock USDC or USDT in a bond for a fixed term and earn interest at maturity. No admin key can touch bond money, and the product-level pause does not apply to bonds.
+
+| Term | Length | Hard lock | Interest (only at maturity) |
+|---|---|---|---|
+| 6 months | 180 days | first 90 days | 20% |
+| 9 months | 270 days | first 135 days | 30% |
+
+- **Deposit (`deposit_bond`).** The depositor signs and pays `principal + fee` from their own token account of the chosen mint. The fee is 0.2% of the principal, rounded **up**, and goes 100% to the SL8 wallet's token account. The principal is split exactly like a `deposit_fee` payment: half (rounded down) into the same-mint payout pool, the rest to the SL8 wallet. Example: $1,000 in USDC costs 1,002.000000; the pool gets +500 and the SL8 wallet +502.
+- **Limits.** At least $50, at most $50K open per wallet (summed over all its positions) and $600K open in total. Caps are measured on principal, not on the fee. Each wallet's deposits are numbered 0, 1, 2, ... (`deposit_index`) and an index is never reused.
+- **State.** A `BondPosition` per deposit (`["bond", depositor, index]`) and one `BondCapTracker` per wallet (`["bond_cap", depositor]`).
+- **Rules at withdrawal.** Interest is not accrued over time. Before the hard lock ends the bond cannot be withdrawn (`BondLocked`). From the lock until maturity the bond is worth its principal. At or after maturity it is worth principal plus the interest.
 
 ## Reconciliation
 

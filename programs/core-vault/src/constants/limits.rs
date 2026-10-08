@@ -46,3 +46,28 @@ pub const HEARTBEAT_MIN_GAP_SECS: i64 = 432_000;
 /// `SetComputeUnitLimit` of 400,000 to a full batch; any single claim can always be
 /// settled alone, whatever its wallet.
 pub const MAX_SETTLE_BATCH: usize = 6;
+
+// ---------------------------------------------------------------- bond vault
+// All amounts are 6-decimal base units of USDC or USDT.
+
+/// Smallest bond principal ($50).
+pub const BOND_MIN_PRINCIPAL: u64 = 50_000_000;
+
+/// Most principal one wallet may have open at once, summed across ALL its open
+/// positions ($50K). Measured on principal, not on the deposit fee.
+pub const BOND_MAX_PER_WALLET: u64 = 50_000_000_000;
+
+/// Most principal open across ALL wallets and positions ($600K).
+pub const BOND_GLOBAL_CAP: u64 = 600_000_000_000;
+
+/// Six-month bond: 180 days, 20% interest paid only at maturity.
+pub const BOND_6M_TERM_SECS: i64 = 15_552_000;
+/// Hard lock of the six-month bond: half the term (90 days). Withdrawals before it fail.
+pub const BOND_6M_LOCK_SECS: i64 = 7_776_000;
+pub const BOND_6M_INTEREST_BPS: u16 = 2_000;
+
+/// Nine-month bond: 270 days, 30% interest paid only at maturity.
+pub const BOND_9M_TERM_SECS: i64 = 23_328_000;
+/// Hard lock of the nine-month bond: half the term (135 days).
+pub const BOND_9M_LOCK_SECS: i64 = 11_664_000;
+pub const BOND_9M_INTEREST_BPS: u16 = 3_000;

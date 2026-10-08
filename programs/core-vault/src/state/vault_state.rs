@@ -23,6 +23,13 @@ pub struct VaultState {
     /// Sum of `owed` over all open claims (6-decimal dollar units).
     pub open_claims_total: u64,
 
+    // ---- bond vault ----
+    /// Principal across ALL open bond positions (the global cap counter).
+    pub bond_principal_open_total: u64,
+    /// Cumulative bond withdrawal fees kept in the pools (informational): no tokens
+    /// move when a withdrawal is requested, so the fee is simply not owed.
+    pub bond_withdrawal_fees_retained: u64,
+
     // ---- heartbeat cycle ----
     /// Id of the most recently BEGUN cycle; 0 = none yet.
     pub cycle_id: u64,
@@ -50,6 +57,8 @@ impl VaultState {
         + 8 // floor_updated_at
         + 8 // open_claims_count
         + 8 // open_claims_total
+        + 8 // bond_principal_open_total
+        + 8 // bond_withdrawal_fees_retained
         + 8 // cycle_id
         + 8 // cycle_started_at
         + 1 // cycle_active

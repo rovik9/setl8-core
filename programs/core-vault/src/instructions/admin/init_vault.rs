@@ -87,6 +87,8 @@ pub fn init_vault(ctx: Context<InitVault>, usdc_mint: Pubkey, usdt_mint: Pubkey)
     vs.floor_updated_at = 0;
     vs.open_claims_count = 0;
     vs.open_claims_total = 0;
+    vs.bond_principal_open_total = 0;
+    vs.bond_withdrawal_fees_retained = 0;
     vs.cycle_id = 0;
     vs.cycle_started_at = 0;
     vs.cycle_active = false;

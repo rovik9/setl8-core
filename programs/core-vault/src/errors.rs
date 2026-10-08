@@ -127,4 +127,28 @@ pub enum VaultError {
 
     #[msg("the payout_tally account is not the product's canonical payout-tally address")]
     InvalidTally,
+
+    /// Reserved: `BondTerm` is a Borsh enum, so an unknown term never reaches the
+    /// handler (instruction-data deserialization fails first). Kept as the named
+    /// error for any future non-enum entry point.
+    #[msg("not a valid bond term")]
+    BondTermInvalid,
+
+    #[msg("bond principal is below the minimum")]
+    BondBelowMinimum,
+
+    #[msg("this deposit would take the wallet above its open-principal cap")]
+    BondWalletCapExceeded,
+
+    #[msg("this deposit would take the vault above its global open-principal cap")]
+    BondGlobalCapExceeded,
+
+    #[msg("the bond is still inside its hard lock period")]
+    BondLocked,
+
+    #[msg("not a valid bond position for this depositor and index")]
+    InvalidBondPosition,
+
+    #[msg("deposit_index does not match the wallet's next bond index")]
+    BondIndexMismatch,
 }

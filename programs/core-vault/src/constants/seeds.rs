@@ -23,3 +23,15 @@ pub const POOL_SEED: &[u8] = b"pool";
 /// request_id.to_le_bytes()]`. One claim per accepted `request_payout`; the
 /// request id is unique per challenge, so a claim address is never reused.
 pub const PAYOUT_CLAIM_SEED: &[u8] = b"payout_claim";
+
+/// Seed for a `BondPosition` PDA: `[BOND_SEED, depositor, deposit_index.to_le_bytes()]`.
+/// The index comes from the depositor's `BondCapTracker` and is never reused.
+pub const BOND_SEED: &[u8] = b"bond";
+
+/// Seed for a depositor's `BondCapTracker` PDA: `[BOND_CAP_SEED, depositor]`.
+pub const BOND_CAP_SEED: &[u8] = b"bond_cap";
+
+/// Seed for the `PayoutClaim` a bond withdrawal creates (claim kind 1):
+/// `[BOND_CLAIM_SEED, depositor, deposit_index.to_le_bytes()]`. A position is
+/// closed by the request, so its index (and this address) is used exactly once.
+pub const BOND_CLAIM_SEED: &[u8] = b"bond_claim";

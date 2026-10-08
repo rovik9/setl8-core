@@ -31,6 +31,7 @@ pub mod state;
 pub mod utils;
 
 use instructions::*;
+use state::BondTerm;
 
 declare_id!("2Z6WNsj4hNhKhmK9Cj3sXV5San9VYhh8gwtyvBfpP6ft");
 
@@ -199,5 +200,12 @@ pub mod core_vault {
     /// `instructions::permissionless::reconcile_product`.
     pub fn reconcile_product(ctx: Context<ReconcileProduct>, product_program_id: Pubkey) -> Result<()> {
         instructions::reconcile_product(ctx, product_program_id)
+    }
+
+    /// Opens a bond (6 or 9 months). The depositor pays principal plus a 0.2% fee;
+    /// the principal is split 50/50 between the same-mint pool and the SL8 wallet.
+    /// See `instructions::permissionless::deposit_bond`.
+    pub fn deposit_bond(ctx: Context<DepositBond>, deposit_index: u64, principal: u64, term: BondTerm) -> Result<()> {
+        instructions::deposit_bond(ctx, deposit_index, principal, term)
     }
 }

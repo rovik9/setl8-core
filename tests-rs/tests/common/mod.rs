@@ -24,7 +24,7 @@ use anchor_spl::token::spl_token::{
 use solana_account::Account as RawAccount;
 use core_vault::{
     errors::VaultError,
-    state::{PayoutClaim, ProductRegistry, TraderState},
+    state::{BondCapTracker, BondPosition, BondTerm, PayoutClaim, ProductRegistry, TraderState},
 };
 use std::cell::RefCell;
 use litesvm::{
@@ -176,6 +176,9 @@ pub struct Env {
     /// Every PayoutClaim address a payout instruction was ever built for (the
     /// candidates for `open_claims`); filled by `payout_ix`.
     pub claim_addrs: RefCell<Vec<Pubkey>>,
+    /// Every bond position / tracker address a bond instruction was built for.
+    pub bond_addrs: RefCell<Vec<Pubkey>>,
+    pub tracker_addrs: RefCell<Vec<Pubkey>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +271,8 @@ impl Env {
             wallets: HashMap::new(),
             tracked: vec![],
             claim_addrs: RefCell::new(vec![]),
+            bond_addrs: RefCell::new(vec![]),
+            tracker_addrs: RefCell::new(vec![]),
         };
         env.tracked.extend([env.usdc_pool, env.usdt_pool]);
         for k in [env.sl8.pubkey(), env.rov.pubkey(), env.payer.pubkey()] {
@@ -557,6 +562,61 @@ impl Env {
             .map(|a| (*a, self.svm.get_account(a).map(|x| x.data).unwrap_or_default()))
             .collect();
         (self.token_snapshot(), self.svm.get_account(&self.vault).unwrap().data, claims)
+    }
+
+    // ---- bonds
+    /// A bond holder: a funded signer with USDC and USDT token accounts.
+    pub fn new_depositor(&mut self) -> Keypair {
+        let k = Keypair::new();
+        self.fund(&k.pubkey());
+        self.fund_wallet(&k.pubkey());
+        k
+    }
+    /// Signs with `signer` (the instruction's depositor); `e.payer` is only the fee payer.
+    pub fn send_as(&mut self, ix: Instruction, signer: &Keypair) -> TransactionResult {
+        let fee_payer = dup(&self.payer);
+        self.send_with(&[ix], &fee_payer, &[signer])
+    }
+    pub fn bond_deposit_result(&mut self, k: &Keypair, idx: u64, principal: u64, term: BondTerm, c: Coin) -> TransactionResult {
+        let ix = deposit_bond_ix(self, &k.pubkey(), idx, principal, term, c);
+        self.send_as(ix, k)
+    }
+    pub fn bond_deposit(&mut self, k: &Keypair, idx: u64, principal: u64, term: BondTerm, c: Coin) -> TransactionMetadata {
+        let r = self.bond_deposit_result(k, idx, principal, term, c);
+        assert_ok(r)
+    }
+    pub fn bond_at(&self, addr: &Pubkey) -> Option<BondPosition> {
+        let a = self.svm.get_account(addr)?;
+        if a.data.is_empty() || a.owner != core_vault::ID {
+            return None;
+        }
+        Some(BondPosition::try_deserialize(&mut a.data.as_slice()).unwrap())
+    }
+    pub fn bond(&self, dep: &Pubkey, idx: u64) -> Option<BondPosition> {
+        self.bond_at(&bond_pda(dep, idx).0)
+    }
+    pub fn tracker_of(&self, dep: &Pubkey) -> Option<BondCapTracker> {
+        let a = self.svm.get_account(&bond_cap_pda(dep).0)?;
+        if a.data.is_empty() || a.owner != core_vault::ID {
+            return None;
+        }
+        Some(BondCapTracker::try_deserialize(&mut a.data.as_slice()).unwrap())
+    }
+    /// BOND INVARIANT: the global counter equals the principal of every open
+    /// position, and each wallet's tracker equals its own open positions.
+    pub fn assert_bond_invariant(&self) {
+        let positions: Vec<BondPosition> = self.bond_addrs.borrow().iter().filter_map(|a| self.bond_at(a)).collect();
+        let total: u64 = positions.iter().map(|p| p.principal).sum();
+        assert_eq!(self.vault_state().bond_principal_open_total, total, "bond_principal_open_total != sum of open principal");
+        for taddr in self.tracker_addrs.borrow().iter() {
+            let Some(a) = self.svm.get_account(taddr) else { continue };
+            if a.owner != core_vault::ID || a.data.is_empty() {
+                continue;
+            }
+            let t = BondCapTracker::try_deserialize(&mut a.data.as_slice()).unwrap();
+            let own: u64 = positions.iter().filter(|p| p.depositor == t.depositor).map(|p| p.principal).sum();
+            assert_eq!(t.open_principal_total, own, "tracker total != the wallet's open positions");
+        }
     }
 
     // ---- payout tally (the sector-owned account reconcile_product reads)
@@ -978,6 +1038,62 @@ pub fn payout_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64
             proposed_request_id: req,
         },
     )
+}
+
+// ------------------------------------------------------------------ bond builders
+
+pub fn bond_pda(depositor: &Pubkey, idx: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"bond", depositor.as_ref(), &idx.to_le_bytes()], &core_vault::ID)
+}
+pub fn bond_cap_pda(depositor: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"bond_cap", depositor.as_ref()], &core_vault::ID)
+}
+
+/// Account positions in deposit_bond.
+#[derive(Clone, Copy)]
+pub struct BondDepositSlots {
+    pub depositor: usize,
+    pub vault: usize,
+    pub source: usize,
+    pub mint: usize,
+    pub pool: usize,
+    pub sl8: usize,
+    pub position: usize,
+    pub tracker: usize,
+    pub token_program: usize,
+    pub system: usize,
+}
+pub const BD: BondDepositSlots =
+    BondDepositSlots { depositor: 0, vault: 1, source: 2, mint: 3, pool: 4, sl8: 5, position: 6, tracker: 7, token_program: 8, system: 9 };
+
+/// deposit_bond. The depositor must already have token accounts (`fund_wallet`).
+pub fn deposit_bond_ix(e: &Env, dep: &Pubkey, idx: u64, principal: u64, term: BondTerm, c: Coin) -> Instruction {
+    let (mint, pool, sl8) = e.coin(c);
+    let position = bond_pda(dep, idx).0;
+    let tracker = bond_cap_pda(dep).0;
+    for (list, a) in [(&e.bond_addrs, position), (&e.tracker_addrs, tracker)] {
+        let mut v = list.borrow_mut();
+        if !v.contains(&a) {
+            v.push(a);
+        }
+    }
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::DepositBond {
+            depositor: *dep,
+            vault_state: e.vault,
+            depositor_token_account: e.wallet_ta(dep, c),
+            mint,
+            pool_token_account: pool,
+            sl8_token_account: sl8,
+            bond_position: position,
+            bond_cap_tracker: tracker,
+            token_program: spl_token::ID,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::DepositBond { deposit_index: idx, principal, term }.data(),
+    }
 }
 
 // ----------------------------------------------------------- reconciliation builder

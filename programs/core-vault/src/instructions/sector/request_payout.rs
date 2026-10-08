@@ -8,7 +8,7 @@ use crate::constants::{
 };
 use crate::errors::VaultError;
 use crate::state::{PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
-use crate::utils::{assert_sector_authority, create_pda_account};
+use crate::utils::{assert_sector_authority, create_pda_account_with};
 
 #[derive(Accounts)]
 #[instruction(trader_wallet: Pubkey, amount: u64, product_program_id: Pubkey, challenge_id: u64, proposed_request_id: u64)]
@@ -168,16 +168,12 @@ fn create_claim_account<'info>(
 ) -> Result<()> {
     let id = claim.request_id.to_le_bytes();
     let bump = [claim.bump];
-    create_pda_account(
+    create_pda_account_with(
         &payer.to_account_info(),
         &payout_claim.to_account_info(),
         &system_program.to_account_info(),
         PayoutClaim::SPACE,
-        &crate::ID,
         &[PAYOUT_CLAIM_SEED, trader_state.as_ref(), &id, &bump],
-    )?;
-
-    let mut data = payout_claim.try_borrow_mut_data()?;
-    let mut out: &mut [u8] = &mut data;
-    claim.try_serialize(&mut out)
+        claim,
+    )
 }
