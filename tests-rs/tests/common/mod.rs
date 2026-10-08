@@ -602,6 +602,18 @@ impl Env {
         }
         Some(BondCapTracker::try_deserialize(&mut a.data.as_slice()).unwrap())
     }
+    pub fn bond_request_result(&mut self, k: &Keypair, idx: u64) -> TransactionResult {
+        let ix = request_bond_payout_ix(self, &k.pubkey(), idx);
+        self.send_as(ix, k)
+    }
+    pub fn bond_request(&mut self, k: &Keypair, idx: u64) -> TransactionMetadata {
+        let r = self.bond_request_result(k, idx);
+        assert_ok(r)
+    }
+    /// The bond claim (kind 1) of `dep`'s position `idx`, if one is open.
+    pub fn bond_claim_opt(&self, dep: &Pubkey, idx: u64) -> Option<PayoutClaim> {
+        self.claim_at(&bond_claim_pda(dep, idx).0)
+    }
     /// BOND INVARIANT: the global counter equals the principal of every open
     /// position, and each wallet's tracker equals its own open positions.
     pub fn assert_bond_invariant(&self) {
@@ -1096,6 +1108,46 @@ pub fn deposit_bond_ix(e: &Env, dep: &Pubkey, idx: u64, principal: u64, term: Bo
     }
 }
 
+pub fn bond_claim_pda(depositor: &Pubkey, idx: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"bond_claim", depositor.as_ref(), &idx.to_le_bytes()], &core_vault::ID)
+}
+
+/// Account positions in request_bond_payout.
+#[derive(Clone, Copy)]
+pub struct BondRequestSlots {
+    pub depositor: usize,
+    pub vault: usize,
+    pub position: usize,
+    pub tracker: usize,
+    pub claim: usize,
+    pub system: usize,
+}
+pub const BR: BondRequestSlots = BondRequestSlots { depositor: 0, vault: 1, position: 2, tracker: 3, claim: 4, system: 5 };
+
+pub fn request_bond_payout_ix(e: &Env, dep: &Pubkey, idx: u64) -> Instruction {
+    let position = bond_pda(dep, idx).0;
+    let claim = bond_claim_pda(dep, idx).0;
+    for (list, a) in [(&e.bond_addrs, position), (&e.claim_addrs, claim)] {
+        let mut v = list.borrow_mut();
+        if !v.contains(&a) {
+            v.push(a);
+        }
+    }
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::RequestBondPayout {
+            depositor: *dep,
+            vault_state: e.vault,
+            bond_position: position,
+            bond_cap_tracker: bond_cap_pda(dep).0,
+            payout_claim: claim,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::RequestBondPayout { deposit_index: idx }.data(),
+    }
+}
+
 // ----------------------------------------------------------- reconciliation builder
 
 pub fn tally_addr(s: &Sector) -> Pubkey {
@@ -1286,4 +1338,31 @@ pub fn legacy_tx_size(ixs: &[Instruction], fee_payer: &Pubkey) -> usize {
     let msg = Message::new(ixs, Some(fee_payer));
     let n = msg.header.num_required_signatures as usize;
     1 + 64 * n + msg.serialize().len()
+}
+
+/// Independent model of one heartbeat cycle's payments (the spec, restated):
+/// one ratio `min(available, owed) / owed` for every claim, `floor(owed * ratio)`
+/// each, capped by the live pool total, larger pool first (tie -> USDC), the other
+/// topping up. `claims` are `owed` amounts in processing order; returns, per claim,
+/// `(from_usdc, from_usdt)`, and mutates `pools` as the payments are made.
+pub fn oracle_settle(claims: &[u64], pools: &mut (u64, u64)) -> Vec<(u64, u64)> {
+    let owed: u128 = claims.iter().map(|&c| c as u128).sum();
+    let available = pools.0 as u128 + pools.1 as u128;
+    let (num, den) = (available.min(owed), owed);
+    claims
+        .iter()
+        .map(|&c| {
+            let target = if den == 0 { 0 } else { c as u128 * num / den };
+            let live = pools.0 as u128 + pools.1 as u128;
+            let pay = target.min(live) as u64;
+            let usdc_first = pools.0 >= pools.1;
+            let (first_bal, _) = if usdc_first { (pools.0, pools.1) } else { (pools.1, pools.0) };
+            let from_first = pay.min(first_bal);
+            let from_second = pay - from_first;
+            let (u, t) = if usdc_first { (from_first, from_second) } else { (from_second, from_first) };
+            pools.0 -= u;
+            pools.1 -= t;
+            (u, t)
+        })
+        .collect()
 }

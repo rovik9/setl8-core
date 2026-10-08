@@ -7,7 +7,7 @@ use crate::constants::{
     VAULT_STATE_SEED,
 };
 use crate::errors::VaultError;
-use crate::state::{PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
+use crate::state::{CLAIM_KIND_TRADER, PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
 use crate::utils::{assert_sector_authority, create_pda_account_with};
 
 #[derive(Accounts)]
@@ -143,6 +143,7 @@ pub fn request_payout(
         owed: amount,
         created_in_cycle: vs.cycle_id,
         last_settled_cycle: 0,
+        kind: CLAIM_KIND_TRADER,
         bump: ctx.bumps.payout_claim,
     };
     create_claim_account(

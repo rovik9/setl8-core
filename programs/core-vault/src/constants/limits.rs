@@ -41,8 +41,9 @@ pub const HEARTBEAT_MIN_GAP_SECS: i64 = 432_000;
 /// Most claims one `settle_claims` call may process. Proven by
 /// tests-rs/tests/settle_batch.rs: a full batch with a distinct key per account,
 /// a ComputeBudget instruction and two signatures is 1,106 bytes (limit 1,232) and
-/// uses ~130,000 CU for ordinary wallets, ~235,000 CU for wallets ground to make the
-/// associated-token-account derivation expensive. Callers should add a
+/// uses ~125,000 CU for ordinary wallets, ~235,000 CU for wallets ground to make the
+/// associated-token-account derivation expensive. Bond claims (kind 1) measure the
+/// same, alone or mixed with trader claims. Callers should add a
 /// `SetComputeUnitLimit` of 400,000 to a full batch; any single claim can always be
 /// settled alone, whatever its wallet.
 pub const MAX_SETTLE_BATCH: usize = 6;

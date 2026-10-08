@@ -124,3 +124,67 @@ fn a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone() {
     println!("one ground claim: {} CU", m.compute_units_consumed);
     assert!(m.compute_units_consumed < 100_000);
 }
+
+// ------------------------------------------------------------ bond claims (kind 1)
+
+/// Bond claims are no bigger on the wire than trader claims, and re-deriving a
+/// kind-1 address costs the same `create_program_address`. Measured for a full
+/// batch of ground wallets: six bond claims, then three bond + three trader claims.
+fn bond_batch(bonds: usize) -> Measured {
+    use core_vault::state::BondTerm;
+    let (mut e, s) = Env::registered(&Cfg { max_payout: 9, ..Cfg::default() });
+    let mut ts = vec![];
+    for i in 0..MAX {
+        let w = grind_wallet(&e);
+        e.fund(&w);
+        e.fund_wallet(&w);
+        let fee_payer = dup(&e.payer);
+        if i < bonds {
+            let ix = deposit_bond_ix(&e, &w, 0, 100_000_000, BondTerm::SixMonths, Coin::Usdc);
+            assert_ok(e.send_with(&[ix], &fee_payer, &[]));
+        } else {
+            e.deposit(&s, &w, 1);
+            e.payout(&s, &w, 1, 100_000_000, 1);
+        }
+        e.make_atas(&w);
+        ts.push((w, i < bonds));
+    }
+    e.advance(core_vault::constants::BOND_6M_LOCK_SECS);
+    let mut triples = vec![];
+    for (w, is_bond) in &ts {
+        if *is_bond {
+            let fee_payer = dup(&e.payer);
+            let ix = request_bond_payout_ix(&e, w, 0);
+            assert_ok(e.send_with(&[ix], &fee_payer, &[]));
+            triples.push((bond_claim_pda(w, 0).0, ata(w, &e.usdc), ata(w, &e.usdt)));
+        } else {
+            triples.push(triple(&e, &s, w, 1, 1));
+        }
+    }
+    // large pools: every claim paid in full from both pools
+    e.set_pool(Coin::Usdc, MAX as u64 * 70_000_000);
+    e.set_pool(Coin::Usdt, MAX as u64 * 40_000_000);
+    e.begin();
+    let caller = e.new_caller();
+    let ixs = [compute_limit_ix(DOCUMENTED_CU_LIMIT as u32), settle_ix(&caller.pubkey(), &e, &triples)];
+    let fee_payer = dup(&e.payer);
+    let size = {
+        let msg = solana_message::Message::new(&ixs, Some(&fee_payer.pubkey()));
+        1 + 64 * msg.header.num_required_signatures as usize + msg.serialize().len()
+    };
+    let m = assert_ok(e.send_with(&ixs, &fee_payer, &[&caller]));
+    assert_eq!(e.vault_state().open_claims_count, 0, "every claim was paid and closed");
+    Measured { size, cu: m.compute_units_consumed }
+}
+
+#[test]
+fn a_full_batch_with_bond_claims_still_fits() {
+    let all_bonds = bond_batch(MAX);
+    let mixed = bond_batch(MAX / 2);
+    println!("six bond claims (ground wallets): {} bytes, {} CU", all_bonds.size, all_bonds.cu);
+    println!("three bond + three trader claims : {} bytes, {} CU", mixed.size, mixed.cu);
+    for m in [&all_bonds, &mixed] {
+        assert!(m.size + 100 <= PACKET, "{} bytes", m.size);
+        assert!(m.cu <= DOCUMENTED_CU_LIMIT, "{} CU", m.cu);
+    }
+}

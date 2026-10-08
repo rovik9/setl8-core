@@ -208,4 +208,11 @@ pub mod core_vault {
     pub fn deposit_bond(ctx: Context<DepositBond>, deposit_index: u64, principal: u64, term: BondTerm) -> Result<()> {
         instructions::deposit_bond(ctx, deposit_index, principal, term)
     }
+
+    /// Withdraws a bond: closes the position and queues its worth (principal, plus
+    /// interest at maturity, minus the 0.2% withdrawal fee) as a claim settled by the
+    /// heartbeat. Depositor only. See `instructions::permissionless::request_bond_payout`.
+    pub fn request_bond_payout(ctx: Context<RequestBondPayout>, deposit_index: u64) -> Result<()> {
+        instructions::request_bond_payout(ctx, deposit_index)
+    }
 }

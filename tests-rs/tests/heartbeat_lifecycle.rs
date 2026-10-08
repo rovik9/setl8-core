@@ -3,6 +3,10 @@
 mod common;
 use common::*;
 use core_vault::constants::HEARTBEAT_MIN_GAP_SECS as GAP;
+use core_vault::constants::{BOND_6M_LOCK_SECS, BOND_6M_TERM_SECS, BOND_9M_LOCK_SECS, BOND_9M_TERM_SECS, BOND_MAX_PER_WALLET};
+use core_vault::state::BondTerm;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
 use std::collections::BTreeMap;
 
 use anchor_lang::solana_program::pubkey::Pubkey;
@@ -124,4 +128,192 @@ fn deposit_request_begin_settle_finalize_then_a_second_cycle_clears_the_carry_ov
     assert_eq!(e.token_balance(&b_usdc) + e.token_balance(&b_usdt), 12 * M);
     // SL8 only ever received its 35% fee shares
     assert_eq!((e.token_balance(&sl8_usdc), e.token_balance(&sl8_usdt)), (14 * M, 7 * M));
+}
+
+// ------------------------------------------------------------------ with bonds
+
+#[test]
+fn a_bond_and_a_trader_payout_share_one_cycle_end_to_end() {
+    let cfg = Cfg {
+        fee_split_bps: 6500,
+        tiers: vec![ChallengeSize { size: 100 * M, cost: 20 * M }],
+        max_payout: 5,
+        reset_bps: vec![],
+    };
+    let (mut e, s) = Env::registered(&cfg);
+    let trader = wallet();
+    e.fund_wallet(&trader);
+    e.make_atas(&trader);
+    let alice = e.new_depositor();
+    let a = alice.pubkey();
+    e.make_atas(&a);
+    let (usdc_pool, sl8_usdc) = (e.usdc_pool, e.sl8_usdc);
+    let totals = e.totals();
+
+    // The trader buys a $20 challenge (pool +13, SL8 +7) and asks for 12.
+    e.deposit_coin(&s, &trader, 1, (100 * M, 20 * M), Coin::Usdc);
+    e.payout(&s, &trader, 1, 12 * M, 1);
+    // Alice locks $1,000 for six months: pays 1,002.000000; pool +500; SL8 +502.
+    e.bond_deposit(&alice, 0, 1_000 * M, BondTerm::SixMonths, Coin::Usdc);
+    assert_eq!(e.token_balance(&usdc_pool), 13 * M + 500 * M);
+    assert_eq!(e.token_balance(&sl8_usdc), 7 * M + 502 * M);
+    assert_eq!(e.vault_state().bond_principal_open_total, 1_000 * M);
+
+    // At maturity she withdraws: gross 1,200, fee 2.4, claim 1,197.6. No tokens move.
+    e.set_time(T0 + BOND_6M_TERM_SECS);
+    e.bond_request(&alice, 0);
+    let vs = e.vault_state();
+    assert_eq!((vs.open_claims_count, vs.open_claims_total), (2, 12 * M + 1_197_600_000));
+    assert_eq!(vs.bond_withdrawal_fees_retained, 2_400_000);
+    assert_eq!(vs.bond_principal_open_total, 0);
+    assert_eq!(e.totals(), totals);
+    e.assert_bond_invariant();
+    e.assert_claim_invariant();
+
+    // One cycle pays both from a pool of 513: ratio 513 / 1,209.6, same for each.
+    e.begin();
+    let owed = 12 * M + 1_197_600_000;
+    assert_eq!(e.vault_state().cycle_owed_snapshot, owed);
+    assert_eq!(e.vault_state().cycle_available_snapshot, 513 * M);
+    let (tt, at) = (triple(&e, &s, &trader, 1, 1), (bond_claim_pda(&a, 0).0, ata(&a, &e.usdc), ata(&a, &e.usdt)));
+    e.settle(&[tt, at]);
+    let pay_t = (12 * M as u128 * (513 * M) as u128 / owed as u128) as u64;
+    let pay_a = (1_197_600_000u128 * (513 * M) as u128 / owed as u128) as u64;
+    assert_eq!(e.token_balance(&tt.1), pay_t);
+    assert_eq!(e.token_balance(&at.1), pay_a);
+    assert_eq!(e.claim(&s, &trader, 1, 1).owed, 12 * M - pay_t);
+    assert_eq!(e.bond_claim_opt(&a, 0).unwrap().owed, 1_197_600_000 - pay_a);
+    assert_eq!(e.totals(), totals);
+    e.assert_claim_invariant();
+    e.finalize();
+    let vs = e.vault_state();
+    assert_eq!(vs.usdc_floor, e.token_balance(&usdc_pool) * 2_500 / 10_000);
+}
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+fn fee_of(x: u64) -> u64 {
+    ((x as u128 * 20 + 9_999) / 10_000) as u64
+}
+
+/// A seeded random run of deposits, withdrawal requests and full heartbeats. After
+/// EVERY step: all tokens are conserved, the pools equal what deposits put in minus
+/// what settlement paid out, retained fees and claims reconcile to the unit, and the
+/// vault's counters equal what is recomputed from the accounts. Payments are checked
+/// against an independent model of the cycle.
+#[test]
+fn seeded_bonds_requests_and_heartbeats_conserve_every_token_and_reconcile() {
+    let mut e = Env::new();
+    let n = 10usize;
+    let ks: Vec<Keypair> = (0..n).map(|_| e.new_depositor()).collect();
+    for k in &ks {
+        e.make_atas(&k.pubkey());
+    }
+    let totals = e.totals();
+    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+
+    struct Open {
+        w: usize,
+        idx: u64,
+        principal: u64,
+        term: BondTerm,
+        created: i64,
+    }
+    let (mut open, mut next, mut wallet_open): (Vec<Open>, Vec<u64>, Vec<u64>) = (vec![], vec![0; n], vec![0; n]);
+    let (mut pool_credit, mut sl8_credit) = (0u128, 0u128);
+    let (mut fees, mut nets) = (0u128, 0u128);
+    let mut last_start: i64 = i64::MIN / 2;
+    let (mut deposits, mut requests, mut cycles) = (0, 0, 0);
+
+    for _ in 0..80 {
+        e.advance((rng.next() % 25) as i64 * 86_400 + (rng.next() % 86_400) as i64);
+        match rng.next() % 4 {
+            0 | 1 => {
+                let w = (rng.next() % n as u64) as usize;
+                let principal = 50 * M + rng.next() % (9_000 * M);
+                if wallet_open[w] + principal > BOND_MAX_PER_WALLET {
+                    continue;
+                }
+                let term = if rng.next() % 2 == 0 { BondTerm::SixMonths } else { BondTerm::NineMonths };
+                let coin = if rng.next() % 2 == 0 { Coin::Usdc } else { Coin::Usdt };
+                e.bond_deposit(&ks[w], next[w], principal, term, coin);
+                open.push(Open { w, idx: next[w], principal, term, created: e.now() });
+                next[w] += 1;
+                wallet_open[w] += principal;
+                pool_credit += (principal / 2) as u128;
+                sl8_credit += (principal - principal / 2 + fee_of(principal)) as u128;
+                deposits += 1;
+            }
+            2 => {
+                let ready: Vec<usize> = (0..open.len())
+                    .filter(|&i| e.now() >= open[i].created + if matches!(open[i].term, BondTerm::SixMonths) { BOND_6M_LOCK_SECS } else { BOND_9M_LOCK_SECS })
+                    .collect();
+                if ready.is_empty() {
+                    continue;
+                }
+                let o = open.remove(ready[(rng.next() % ready.len() as u64) as usize]);
+                let (full, bps) = match o.term {
+                    BondTerm::SixMonths => (BOND_6M_TERM_SECS, 2_000u128),
+                    BondTerm::NineMonths => (BOND_9M_TERM_SECS, 3_000),
+                };
+                let gross = if e.now() >= o.created + full { o.principal + (o.principal as u128 * bps / 10_000) as u64 } else { o.principal };
+                fees += fee_of(gross) as u128;
+                nets += (gross - fee_of(gross)) as u128;
+                e.bond_request(&ks[o.w], o.idx);
+                wallet_open[o.w] -= o.principal;
+                requests += 1;
+            }
+            _ => {
+                // a full heartbeat over every open claim
+                if e.now() < last_start + GAP {
+                    let t = last_start + GAP;
+                    e.set_time(t);
+                }
+                let claims = e.open_claims();
+                if claims.is_empty() {
+                    continue;
+                }
+                last_start = e.now();
+                let owed: Vec<u64> = claims.iter().map(|(_, c)| c.owed).collect();
+                let mut pools = e.pools();
+                let expect = oracle_settle(&owed, &mut pools);
+                e.begin();
+                let triples: Vec<Triple> = claims.iter().map(|(addr, c)| (*addr, ata(&c.trader_wallet, &e.usdc), ata(&c.trader_wallet, &e.usdt))).collect();
+                for chunk in triples.chunks(6) {
+                    e.settle(chunk);
+                }
+                for (i, (addr, c)) in claims.iter().enumerate() {
+                    let pay = expect[i].0 + expect[i].1;
+                    let after = e.claim_at(addr).map(|x| x.owed).unwrap_or(0);
+                    assert_eq!(after, c.owed - pay, "claim {i} remainder");
+                }
+                assert_eq!(e.pools(), pools, "pools after the cycle match the model");
+                e.finalize();
+                cycles += 1;
+            }
+        }
+        // ---- invariants after every step
+        assert_eq!(e.totals(), totals, "tokens are conserved");
+        let paid_out: u128 = ks
+            .iter()
+            .map(|k| (e.token_balance(&ata(&k.pubkey(), &e.usdc.clone())) + e.token_balance(&ata(&k.pubkey(), &e.usdt.clone()))) as u128)
+            .sum();
+        let (pu, pt) = e.pools();
+        assert_eq!(pu as u128 + pt as u128, pool_credit - paid_out, "pools = deposits' pool shares - everything paid out");
+        assert_eq!(e.token_balance(&e.sl8_usdc.clone()) as u128 + e.token_balance(&e.sl8_usdt.clone()) as u128, sl8_credit);
+        let vs = e.vault_state();
+        assert_eq!(vs.bond_withdrawal_fees_retained as u128, fees, "retained fees");
+        assert_eq!(vs.open_claims_total as u128 + paid_out, nets, "claims requested = paid + still owed");
+        e.assert_bond_invariant();
+        e.assert_claim_invariant();
+    }
+    assert!(deposits > 10 && requests > 3 && cycles > 2, "the run exercised everything ({deposits} deposits, {requests} requests, {cycles} cycles)");
 }

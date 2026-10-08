@@ -2,11 +2,13 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
 use crate::constants::{
-    MAX_SETTLE_BATCH, PAYOUT_CLAIM_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED,
+    BOND_CLAIM_SEED, MAX_SETTLE_BATCH, PAYOUT_CLAIM_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED,
 };
 use crate::errors::VaultError;
-use crate::state::{PayoutClaim, VaultState};
-use crate::utils::{associated_token_address, cycle_ratio, destination_usable, plan_settlement};
+use crate::state::{PayoutClaim, VaultState, CLAIM_KIND_BOND, CLAIM_KIND_TRADER};
+use crate::utils::{
+    associated_token_address, close_pda_account, cycle_ratio, destination_usable, plan_settlement, write_account,
+};
 
 #[derive(Accounts)]
 pub struct SettleClaims<'info> {
@@ -83,10 +85,18 @@ fn settle_one<'info>(
     require_keys_eq!(*claim_info.owner, crate::ID, VaultError::InvalidClaim);
     require!(claim_info.is_writable, VaultError::InvalidClaim);
     let mut claim = read_claim(claim_info)?;
-    let canonical = Pubkey::create_program_address(
-        &[PAYOUT_CLAIM_SEED, claim.trader_state.as_ref(), &claim.request_id.to_le_bytes(), &[claim.bump]],
-        &crate::ID,
-    )
+    // The canonical address depends on the claim kind; an unknown kind is invalid.
+    let id = claim.request_id.to_le_bytes();
+    let bump = [claim.bump];
+    let canonical = match claim.kind {
+        CLAIM_KIND_TRADER => {
+            Pubkey::create_program_address(&[PAYOUT_CLAIM_SEED, claim.trader_state.as_ref(), &id, &bump], &crate::ID)
+        }
+        CLAIM_KIND_BOND => {
+            Pubkey::create_program_address(&[BOND_CLAIM_SEED, claim.trader_wallet.as_ref(), &id, &bump], &crate::ID)
+        }
+        _ => return err!(VaultError::InvalidClaim),
+    }
     .map_err(|_| error!(VaultError::InvalidClaim))?;
     require_keys_eq!(claim_info.key(), canonical, VaultError::InvalidClaim);
 
@@ -137,7 +147,7 @@ fn settle_one<'info>(
 
     if claim.owed == 0 {
         vs.open_claims_count = vs.open_claims_count.checked_sub(1).ok_or(VaultError::MathOverflow)?;
-        close_account(claim_info, &a.caller.to_account_info())
+        close_pda_account(claim_info, &a.caller.to_account_info())
     } else {
         write_claim(claim_info, &claim)
     }
@@ -185,22 +195,5 @@ fn read_claim(info: &AccountInfo) -> Result<PayoutClaim> {
 
 /// Writes the claim back (discriminator + data) right away.
 fn write_claim(info: &AccountInfo, claim: &PayoutClaim) -> Result<()> {
-    let mut data = info.try_borrow_mut_data()?;
-    let mut out: &mut [u8] = &mut data;
-    claim.try_serialize(&mut out)
-}
-
-/// Closes `info` with Anchor's `close` semantics: lamports to `destination`,
-/// data emptied, owner reassigned to the system program. The account can no
-/// longer be read as a claim (owner check) even if it is re-funded in the same
-/// transaction, so a second listing of it in a batch fails as `InvalidClaim`.
-fn close_account<'info>(info: &AccountInfo<'info>, destination: &AccountInfo<'info>) -> Result<()> {
-    let total = destination
-        .lamports()
-        .checked_add(info.lamports())
-        .ok_or(VaultError::MathOverflow)?;
-    **destination.try_borrow_mut_lamports()? = total;
-    **info.try_borrow_mut_lamports()? = 0;
-    info.assign(&anchor_lang::system_program::ID);
-    info.resize(0).map_err(Into::into)
+    write_account(info, claim)
 }

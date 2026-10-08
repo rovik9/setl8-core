@@ -83,3 +83,18 @@ pub fn write_account<T: AccountSerialize>(info: &AccountInfo, value: &T) -> Resu
     let mut out: &mut [u8] = &mut data;
     value.try_serialize(&mut out)
 }
+
+/// Closes `info` with Anchor's `close` semantics: lamports to `destination`, data
+/// emptied, owner reassigned to the system program. The account can no longer be
+/// read as one of ours (owner check) even if it is re-funded in the same
+/// transaction.
+pub fn close_pda_account<'info>(info: &AccountInfo<'info>, destination: &AccountInfo<'info>) -> Result<()> {
+    let total = destination
+        .lamports()
+        .checked_add(info.lamports())
+        .ok_or(crate::errors::VaultError::MathOverflow)?;
+    **destination.try_borrow_mut_lamports()? = total;
+    **info.try_borrow_mut_lamports()? = 0;
+    info.assign(&anchor_lang::system_program::ID);
+    info.resize(0).map_err(Into::into)
+}

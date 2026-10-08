@@ -34,7 +34,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 |---|---|---|
 | `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product` | Both admin signatures (SL8 + Rov) |
 | `sector/` | `deposit_fee`, `deposit_reset`, `record_activity`, `request_payout`, `flag_trader_failed` | A registered sector program via CPI, authenticated by its `sector_authority` PDA |
-| `permissionless/` | `mark_abandoned`, `reconcile_product`, `deposit_bond`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
+| `permissionless/` | `mark_abandoned`, `reconcile_product`, `deposit_bond`, `request_bond_payout`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
 
 The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's on-chain identity against the `ProductRegistry` and never trusts a self-reported program ID.
 
@@ -60,7 +60,7 @@ programs/core-vault/src/
   instructions/       one file per instruction (Accounts struct + handler)
     admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product
     sector/             deposit_fee, deposit_reset, record_activity, request_payout, flag_trader_failed
-    permissionless/     mark_abandoned, reconcile_product, deposit_bond, begin_heartbeat, settle_claims, finalize_heartbeat
+    permissionless/     mark_abandoned, reconcile_product, deposit_bond, request_bond_payout, begin_heartbeat, settle_claims, finalize_heartbeat
   utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers),
                       settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check), bond.rs (bond fees and interest),
                       pda_account.rs
@@ -125,7 +125,9 @@ Anyone can lock USDC or USDT in a bond for a fixed term and earn interest at mat
 - **Deposit (`deposit_bond`).** The depositor signs and pays `principal + fee` from their own token account of the chosen mint. The fee is 0.2% of the principal, rounded **up**, and goes 100% to the SL8 wallet's token account. The principal is split exactly like a `deposit_fee` payment: half (rounded down) into the same-mint payout pool, the rest to the SL8 wallet. Example: $1,000 in USDC costs 1,002.000000; the pool gets +500 and the SL8 wallet +502.
 - **Limits.** At least $50, at most $50K open per wallet (summed over all its positions) and $600K open in total. Caps are measured on principal, not on the fee. Each wallet's deposits are numbered 0, 1, 2, ... (`deposit_index`) and an index is never reused.
 - **State.** A `BondPosition` per deposit (`["bond", depositor, index]`) and one `BondCapTracker` per wallet (`["bond_cap", depositor]`).
-- **Rules at withdrawal.** Interest is not accrued over time. Before the hard lock ends the bond cannot be withdrawn (`BondLocked`). From the lock until maturity the bond is worth its principal. At or after maturity it is worth principal plus the interest.
+- **Rules at withdrawal.** Interest is not accrued over time. Before the hard lock ends the bond cannot be withdrawn (`BondLocked`). From the lock until maturity the bond is worth its principal. At or after maturity it is worth principal plus `floor(principal * interest_bps / 10_000)`. The interest rate is copied into the position at deposit, so it cannot change under an open bond.
+- **Withdrawal (`request_bond_payout`).** Only the depositor can call it. It closes the position (rent back to the depositor), frees the wallet's and the vault's cap room, and queues the amount owed as a normal `PayoutClaim` (kind 1, address `["bond_claim", depositor, index]`). The 0.2% withdrawal fee (rounded up) comes off the amount owed. No tokens move at request time, so the fee is simply not owed: it stays in the pool, and `bond_withdrawal_fees_retained` counts it. Examples for $1,000: six months at maturity owes 1,200 less 2.4 = 1,197.6; the same bond at month 4 owes 1,000 less 2 = 998; nine months at maturity owes 1,300 less 2.6 = 1,297.4.
+- **Payment.** Bond claims are settled by the same permissionless heartbeat as trader claims, with the same single cycle ratio, equal pro-rata, carry-over, skip rules and associated-token-account destinations. The two kinds are indistinguishable in settlement; only the claim address derivation differs (`PayoutClaim.kind`).
 
 ## Reconciliation
 
@@ -145,7 +147,7 @@ The vault and each sector program keep independent books of the same thing: how 
 ## Design notes
 
 - **Minimal money surface.** Only `deposit_fee`, `deposit_reset` (tokens in) and `settle_claims` (tokens out) move tokens. `request_payout` only records a claim.
-- **Settlement batches.** `settle_claims` takes at most `MAX_SETTLE_BATCH = 6` claims per call: a full batch is 1,106 bytes (limit 1,232) and about 130,000 compute units (about 235,000 for wallets ground to make the token-account derivation expensive), so add a `SetComputeUnitLimit` of 400,000. Any single claim can always be settled alone. `tests-rs/tests/settle_batch.rs` measures all of this.
+- **Settlement batches.** `settle_claims` takes at most `MAX_SETTLE_BATCH = 6` claims per call: a full batch is 1,106 bytes (limit 1,232) and about 125,000 compute units (about 235,000 for wallets ground to make the token-account derivation expensive), so add a `SetComputeUnitLimit` of 400,000. Any single claim can always be settled alone. `tests-rs/tests/settle_batch.rs` measures all of this.
 - **Unusable destinations are skipped, wrong ones are errors.** A claim whose associated token accounts are missing, frozen, re-owned, or of the wrong mint is skipped and stays owed forever. Passing an address that is not the trader's associated token account reverts the whole transaction.
 - **Stale paths return `Ok`.** An inactivity timeout has to persist the `Abandoned` state, so the stale path of `record_activity` and `request_payout` returns success plus return data (`ActivityOutcome` / `PayoutOutcome`) instead of an error, which would roll the state change back.
 - **Fee split is validated.** `fee_split_bps` above 10,000 is rejected in `register_product` and `update_product_config`.
