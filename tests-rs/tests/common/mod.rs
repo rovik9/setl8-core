@@ -343,6 +343,22 @@ impl Env {
         }
     }
 
+    /// Creates `w`'s ASSOCIATED token account for `c` (the only destination
+    /// settle_claims accepts) holding `amount`.
+    pub fn make_ata(&mut self, w: &Pubkey, c: Coin, amount: u64) -> Pubkey {
+        let mint = self.coin(c).0;
+        let addr = ata(w, &mint);
+        self.set_token_account(&addr, &mint, w, amount);
+        if !self.tracked.contains(&addr) {
+            self.tracked.push(addr);
+        }
+        addr
+    }
+    /// Both ATAs of `w`, empty.
+    pub fn make_atas(&mut self, w: &Pubkey) -> WalletTok {
+        WalletTok { usdc: self.make_ata(w, Coin::Usdc, 0), usdt: self.make_ata(w, Coin::Usdt, 0) }
+    }
+
     /// Idempotent: gives `w` a USDC and a USDT token account holding
     /// `WALLET_START` each.
     pub fn fund_wallet(&mut self, w: &Pubkey) -> WalletTok {
@@ -382,7 +398,10 @@ impl Env {
         for a in self.tracked.iter().chain([&self.sl8_usdc, &self.sl8_usdt]) {
             if let Some(acct) = self.svm.get_account(a) {
                 if acct.owner == spl_token::ID && acct.data.len() == SplAccount::LEN {
-                    m.insert(*a, SplAccount::unpack(&acct.data).unwrap().amount);
+                    // an uninitialised token account (a test may plant one) holds nothing
+                    if let Ok(t) = SplAccount::unpack(&acct.data) {
+                        m.insert(*a, t.amount);
+                    }
                 }
             }
         }
@@ -515,6 +534,70 @@ impl Env {
     pub fn abandon(&mut self, s: &Sector, w: &Pubkey, id: u64) -> TransactionResult {
         let ix = abandon_ix(&self.payer.pubkey(), s, w, id);
         self.send(ix)
+    }
+
+    /// (USDC pool, USDT pool) balances.
+    pub fn pools(&self) -> (u64, u64) {
+        (self.token_balance(&self.usdc_pool), self.token_balance(&self.usdt_pool))
+    }
+    /// Total of every tracked token account per mint: (USDC, USDT). Conserved by settlement.
+    pub fn totals(&self) -> (u128, u128) {
+        (self.total_of(&self.usdc.clone()), self.total_of(&self.usdt.clone()))
+    }
+    pub fn lamports(&self, a: &Pubkey) -> u64 {
+        self.svm.get_balance(a).unwrap_or(0)
+    }
+    /// Everything a rejected heartbeat instruction must leave untouched: all
+    /// tracked token balances, the VaultState bytes and every known claim's bytes.
+    pub fn digest(&self) -> (BTreeMap<Pubkey, u64>, Vec<u8>, Vec<(Pubkey, Vec<u8>)>) {
+        let claims = self
+            .claim_addrs
+            .borrow()
+            .iter()
+            .map(|a| (*a, self.svm.get_account(a).map(|x| x.data).unwrap_or_default()))
+            .collect();
+        (self.token_snapshot(), self.svm.get_account(&self.vault).unwrap().data, claims)
+    }
+
+    // ---- heartbeat (assert success)
+    /// A funded caller distinct from the fee payer (so its own balance moves only
+    /// by what the instruction does to it).
+    pub fn new_caller(&mut self) -> Keypair {
+        let k = Keypair::new();
+        self.fund(&k.pubkey());
+        k
+    }
+    pub fn begin(&mut self) -> TransactionMetadata {
+        let ix = begin_ix(&self.payer.pubkey(), self);
+        self.ok(ix)
+    }
+    pub fn begin_result(&mut self) -> TransactionResult {
+        let ix = begin_ix(&self.payer.pubkey(), self);
+        self.send(ix)
+    }
+    pub fn settle(&mut self, triples: &[Triple]) -> TransactionMetadata {
+        let ix = settle_ix(&self.payer.pubkey(), self, triples);
+        self.ok(ix)
+    }
+    pub fn settle_result(&mut self, triples: &[Triple]) -> TransactionResult {
+        let ix = settle_ix(&self.payer.pubkey(), self, triples);
+        self.send(ix)
+    }
+    pub fn finalize(&mut self) -> TransactionMetadata {
+        let ix = finalize_ix(&self.payer.pubkey(), self);
+        self.ok(ix)
+    }
+    pub fn finalize_result(&mut self) -> TransactionResult {
+        let ix = finalize_ix(&self.payer.pubkey(), self);
+        self.send(ix)
+    }
+    /// A request_payout for a fresh, funded trader (challenge 1, request 1) with
+    /// the given claim size. Returns (wallet, claim address).
+    pub fn queue_claim(&mut self, s: &Sector, owed: u64) -> (Pubkey, Pubkey) {
+        let w = wallet();
+        self.deposit(s, &w, 1);
+        self.payout(s, &w, 1, owed, 1);
+        (w, claim_key(s, &w, 1, 1))
     }
 
     // ---- decoding
@@ -867,6 +950,87 @@ pub fn payout_ix(e: &Env, s: &Sector, w: &Pubkey, id: u64, amount: u64, req: u64
     )
 }
 
+// ------------------------------------------------------------- heartbeat builders
+
+/// The associated token account of `wallet` for `mint` (classic Token program).
+pub fn ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[wallet.as_ref(), spl_token::ID.as_ref(), mint.as_ref()],
+        &core_vault::constants::ATA_PROGRAM_ID,
+    )
+    .0
+}
+
+/// One settle_claims batch entry: (claim, trader USDC account, trader USDT account).
+pub type Triple = (Pubkey, Pubkey, Pubkey);
+
+/// The correct triple for a wallet's claim (its associated token accounts).
+pub fn triple(e: &Env, s: &Sector, w: &Pubkey, id: u64, req: u64) -> Triple {
+    (claim_key(s, w, id, req), ata(w, &e.usdc), ata(w, &e.usdt))
+}
+
+pub fn begin_ix(caller: &Pubkey, e: &Env) -> Instruction {
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::BeginHeartbeat {
+            caller: *caller,
+            vault_state: e.vault,
+            usdc_pool: e.usdc_pool,
+            usdt_pool: e.usdt_pool,
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::BeginHeartbeat {}.data(),
+    }
+}
+
+pub fn finalize_ix(caller: &Pubkey, e: &Env) -> Instruction {
+    Instruction {
+        program_id: core_vault::ID,
+        accounts: core_vault::accounts::FinalizeHeartbeat {
+            caller: *caller,
+            vault_state: e.vault,
+            usdc_pool: e.usdc_pool,
+            usdt_pool: e.usdt_pool,
+        }
+        .to_account_metas(None),
+        data: core_vault::instruction::FinalizeHeartbeat {}.data(),
+    }
+}
+
+/// Account positions in settle_claims: 0 caller, 1 vault, 2 usdc_mint, 3 usdt_mint,
+/// 4 usdc_pool, 5 usdt_pool, 6 token_program, then the triples from 7.
+pub const ST: usize = 7;
+
+pub fn settle_ix(caller: &Pubkey, e: &Env, triples: &[Triple]) -> Instruction {
+    let mut accounts = core_vault::accounts::SettleClaims {
+        caller: *caller,
+        vault_state: e.vault,
+        usdc_mint: e.usdc,
+        usdt_mint: e.usdt,
+        usdc_pool: e.usdc_pool,
+        usdt_pool: e.usdt_pool,
+        token_program: spl_token::ID,
+    }
+    .to_account_metas(None);
+    for (claim, usdc_ata, usdt_ata) in triples {
+        accounts.push(AccountMeta::new(*claim, false));
+        accounts.push(AccountMeta::new(*usdc_ata, false));
+        accounts.push(AccountMeta::new(*usdt_ata, false));
+    }
+    Instruction { program_id: core_vault::ID, accounts, data: core_vault::instruction::SettleClaims {}.data() }
+}
+
+/// ComputeBudget `SetComputeUnitLimit`.
+pub fn compute_limit_ix(units: u32) -> Instruction {
+    let mut data = vec![2u8];
+    data.extend_from_slice(&units.to_le_bytes());
+    Instruction {
+        program_id: anchor_lang::prelude::pubkey!("ComputeBudget111111111111111111111111111111"),
+        accounts: vec![],
+        data,
+    }
+}
+
 // ------------------------------------------------------------ error helpers
 
 /// The (instruction index, InstructionError) of a failed tx; panics with logs
@@ -949,4 +1113,12 @@ pub fn wallet() -> Pubkey {
 /// No token account moved and no TraderState-like account appeared/changed.
 pub fn assert_snapshot_unchanged(before: &BTreeMap<Pubkey, u64>, after: &BTreeMap<Pubkey, u64>) {
     assert_eq!(before, after, "a rejected payment must not move any token balance");
+}
+
+/// Serialized size of a legacy transaction with these instructions, one fee-payer
+/// signature, and no lookup tables: `1 + 64 * signatures + message`.
+pub fn legacy_tx_size(ixs: &[Instruction], fee_payer: &Pubkey) -> usize {
+    let msg = Message::new(ixs, Some(fee_payer));
+    let n = msg.header.num_required_signatures as usize;
+    1 + 64 * n + msg.serialize().len()
 }

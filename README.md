@@ -34,7 +34,7 @@ Sector programs never touch the pools directly. They call the vault over CPI, an
 |---|---|---|
 | `admin/` | `init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product` | Both admin signatures (SL8 + Rov) |
 | `sector/` | `deposit_fee`, `deposit_reset`, `record_activity`, `request_payout`, `flag_trader_failed` | A registered sector program via CPI, authenticated by its `sector_authority` PDA |
-| `permissionless/` | `mark_abandoned` | Anyone |
+| `permissionless/` | `mark_abandoned`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat` | Anyone |
 
 The CPI-auth check is `utils::assert_sector_authority`. It verifies the caller's on-chain identity against the `ProductRegistry` and never trusts a self-reported program ID.
 
@@ -55,12 +55,13 @@ programs/core-vault/src/
   lib.rs              the program: one thin wrapper per instruction, grouped by who calls it
   constants/          seeds.rs  admin.rs  limits.rs  tokens.rs
   errors.rs           VaultError
-  state/              on-chain accounts: vault_state, product_registry, trader_state
+  state/              on-chain accounts: vault_state, product_registry, trader_state, payout_claim
   instructions/       one file per instruction (Accounts struct + handler)
     admin/              init_vault, register_product, update_product_config, pause_product, reactivate_product
     sector/             deposit_fee, deposit_reset, record_activity, request_payout, flag_trader_failed
-    permissionless/     mark_abandoned
-  utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers)
+    permissionless/     mark_abandoned, begin_heartbeat, settle_claims, finalize_heartbeat
+  utils/              auth.rs (sector CPI-auth check), token_payment.rs (fee split + transfers),
+                      settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tests/                Anchor TypeScript tests + admin test keypairs
 scripts/              build, test and deploy-gate scripts (see below)
@@ -106,13 +107,15 @@ scripts/test-all.sh               # everything below, stops at the first failure
 3. `cargo test --manifest-path tests-rs/Cargo.toml`, the LiteSVM integration suite;
 4. `scripts/test-ts.sh`, the TypeScript suite on a validator loaded with the test `.so`.
 
-`tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and payouts from the larger pool. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
+`tests-rs` is a separate Cargo workspace with its own `Cargo.lock`, so LiteSVM's dependency tree never touches the program's lockfile. It exercises every instruction with exact-error assertions: admin signatures, CPI authentication, fee splits, the pause-adjusted inactivity clock, and the payout queue with its pro-rata heartbeat settlement. It enables the `localnet` feature and refuses to run against a `.so` that does not embed the same admin keys. Set `CORE_VAULT_SO=/path/to/other.so` to run it against a different build (used for mutation testing).
 
 Don't use plain `anchor test`: it would load the real-key build, which the suite cannot sign for.
 
 ## Design notes
 
-- **Minimal money surface.** Only `deposit_fee`, `deposit_reset` and `request_payout` move tokens.
+- **Minimal money surface.** Only `deposit_fee`, `deposit_reset` (tokens in) and `settle_claims` (tokens out) move tokens. `request_payout` only records a claim.
+- **Settlement batches.** `settle_claims` takes at most `MAX_SETTLE_BATCH = 6` claims per call: a full batch is 1,106 bytes (limit 1,232) and about 130,000 compute units (about 235,000 for wallets ground to make the token-account derivation expensive), so add a `SetComputeUnitLimit` of 400,000. Any single claim can always be settled alone. `tests-rs/tests/settle_batch.rs` measures all of this.
+- **Unusable destinations are skipped, wrong ones are errors.** A claim whose associated token accounts are missing, frozen, re-owned, or of the wrong mint is skipped and stays owed forever. Passing an address that is not the trader's associated token account reverts the whole transaction.
 - **Stale paths return `Ok`.** An inactivity timeout has to persist the `Abandoned` state, so the stale path of `record_activity` and `request_payout` returns success plus return data (`ActivityOutcome` / `PayoutOutcome`) instead of an error, which would roll the state change back.
 - **Fee split is validated.** `fee_split_bps` above 10,000 is rejected in `register_product` and `update_product_config`.
 - **Large accounts are boxed.** Wide `Accounts` structs use `Box<Account<…>>` to stay under the SBF stack limit.

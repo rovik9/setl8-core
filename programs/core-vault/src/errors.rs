@@ -97,4 +97,31 @@ pub enum VaultError {
 
     #[msg("the product's fee_split_bps is above 10_000")]
     InvalidFeeSplit,
+
+    #[msg("a heartbeat cycle is already in progress")]
+    CycleInProgress,
+
+    #[msg("no heartbeat cycle is in progress")]
+    NoCycleInProgress,
+
+    #[msg("the minimum gap since the last heartbeat cycle started has not elapsed")]
+    HeartbeatTooEarly,
+
+    #[msg("not every eligible claim has been processed this cycle")]
+    CycleIncomplete,
+
+    #[msg("claim is not eligible for this cycle (created during it)")]
+    ClaimNotEligible,
+
+    #[msg("claim was already processed this cycle")]
+    ClaimAlreadySettled,
+
+    #[msg("not a valid payout claim: wrong owner, layout or address, or a malformed batch")]
+    InvalidClaim,
+
+    #[msg("too many claims in one settle_claims batch")]
+    BatchTooLarge,
+
+    #[msg("settle_claims needs at least one claim")]
+    EmptyBatch,
 }

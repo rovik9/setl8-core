@@ -173,4 +173,24 @@ pub mod core_vault {
     ) -> Result<()> {
         instructions::mark_abandoned(ctx, trader_wallet, product_program_id, challenge_id)
     }
+
+    /// Permissionless. Opens a heartbeat cycle (at most one at a time, at least 5
+    /// days between starts) and snapshots what is owed and what is available. See
+    /// `instructions::permissionless::begin_heartbeat`.
+    pub fn begin_heartbeat(ctx: Context<BeginHeartbeat>) -> Result<()> {
+        instructions::begin_heartbeat(ctx)
+    }
+
+    /// Permissionless. Pays one batch of queued payout claims pro rata (remaining
+    /// accounts: `[claim, trader_usdc_ata, trader_usdt_ata]` triples). See
+    /// `instructions::permissionless::settle_claims`.
+    pub fn settle_claims<'info>(ctx: Context<'_, '_, '_, 'info, SettleClaims<'info>>) -> Result<()> {
+        instructions::settle_claims(ctx)
+    }
+
+    /// Permissionless. Ends the cycle once every eligible claim was processed and
+    /// sets the 25% reserve floors. See `instructions::permissionless::finalize_heartbeat`.
+    pub fn finalize_heartbeat(ctx: Context<FinalizeHeartbeat>) -> Result<()> {
+        instructions::finalize_heartbeat(ctx)
+    }
 }
