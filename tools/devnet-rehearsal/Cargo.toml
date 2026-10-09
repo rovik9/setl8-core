@@ -1,0 +1,28 @@
+[package]
+name = "devnet-rehearsal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test scaffolding: drives the whole core-vault protocol on a real cluster (devnet) through setl8-admin and the mock sector program, and records what happened."
+
+# Standalone workspace with its own Cargo.lock (seeded from tools/admin's).
+[workspace]
+
+[dependencies]
+# The admin tool's library, built with the PUBLIC TEST admin keys: the rehearsal runs the
+# real plan / inspect / sign / sign / send code paths, with scripted confirmations.
+setl8-admin = { path = "../admin", features = ["localnet"] }
+core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint", "localnet"] }
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+anchor-lang = "=0.32.1"
+anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }
+solana-keypair = "=2.2.3"
+solana-signer = "=2.2.1"
+solana-signature = "=2.3.0"
+solana-message = "=2.4.0"
+solana-hash = "=2.3.0"
+bs58 = "=0.5.1"
+base64 = "=0.22.1"
+bincode = "=1.3.3"
+serde_json = "=1.0.151"
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "json"] }

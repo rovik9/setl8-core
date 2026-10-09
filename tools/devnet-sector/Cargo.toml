@@ -1,0 +1,30 @@
+[package]
+name = "devnet-sector-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "LiteSVM integration tests for the mock sector program (TEST SCAFFOLDING for the core-vault devnet rehearsal)."
+
+# Own workspace, own Cargo.lock, own target dir: nothing here touches the vault's or tests-rs's lockfile.
+[workspace]
+members = ["program"]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+
+[dev-dependencies]
+mock-sector = { path = "program", features = ["no-entrypoint"] }
+core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint", "localnet"] }
+# v0.4.1 (what the mock sector builds against); core-vault itself still pulls v0.4.0, a different package to cargo.
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+borsh = "=0.10.4"
+anchor-lang = "=0.32.1"
+anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }
+litesvm = "=0.7.0"
+solana-account = "=2.2.1"
+solana-keypair = "=2.2.3"
+solana-signer = "=2.2.1"
+solana-message = "=2.4.0"
+solana-transaction = "=2.2.3"
+solana-transaction-error = "=2.2.1"

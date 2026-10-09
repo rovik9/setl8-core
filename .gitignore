@@ -19,3 +19,21 @@ test-ledger/
 *-keypair.json
 id.json
 *.pem
+
+# Module 6 devnet rehearsal: the throwaway keys live OUTSIDE the repo in ~/.setl8-devnet (chmod 700).
+# Belt and braces: nothing that looks like one of them, or like a rehearsal artefact, can ever be added.
+.setl8-devnet/
+rehearsal-work*/
+rehearsal-*.jsonl
+rehearsal-*.md
+sl8-test.json
+rov-test.json
+upgrade-authority.json
+freeze-authority.json
+keeper.json
+program-vault.json
+program-sector.json
+usdc-mint.json
+usdt-mint.json
+trader[0-9].json
+bonder[0-9].json
