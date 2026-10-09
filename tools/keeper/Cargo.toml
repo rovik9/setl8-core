@@ -1,0 +1,47 @@
+[package]
+name = "setl8-keeper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Permissionless off-chain runner for the core-vault payout cycle (reconcile, begin, settle, finalize). Holds no authority over funds."
+
+[lib]
+name = "setl8_keeper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "setl8-keeper"
+path = "src/main.rs"
+
+# Standalone workspace with its own Cargo.lock (seeded from tools/admin's): the program's,
+# tests-rs's and tools/admin's lockfiles never change because of this tool.
+[workspace]
+
+[features]
+# Same meaning as in core-vault and setl8-admin: embed the PUBLIC TEST admin keys. The default build
+# embeds the REAL admin public keys. The keeper needs no admin key; it derives the vault PDA from them
+# and REFUSES to run with a fee-payer key equal to either.
+localnet = ["core-vault/localnet", "setl8-admin/localnet"]
+
+[dependencies]
+setl8-admin = { path = "../admin" }
+core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint"] }
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+anchor-lang = "=0.32.1"
+anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }
+solana-keypair = "=2.2.3"
+solana-signer = "=2.2.1"
+solana-signature = "=2.3.0"
+solana-message = "=2.4.0"
+solana-hash = "=2.3.0"
+bs58 = "=0.5.1"
+base64 = "=0.22.1"
+bincode = "=1.3.3"
+serde_json = "=1.0.151"
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+litesvm = "=0.7.0"
+solana-account = "=2.2.1"
+solana-transaction = "=2.2.3"
+solana-transaction-error = "=2.2.1"

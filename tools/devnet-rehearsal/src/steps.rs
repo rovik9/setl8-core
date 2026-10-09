@@ -1418,3 +1418,48 @@ pub fn results_markdown(c: &Ctx) -> String {
     }
     o
 }
+
+/// `--extra-claims N`: N more traders, generated in memory (their keys are never written anywhere),
+/// each with token accounts, a $50 challenge (alternating USDC / USDT) and one queued claim. Makes a queue
+/// long enough for more than one settlement batch.
+pub fn extra_claims(c: &mut Ctx) -> R<()> {
+    let n = c.extra_claims;
+    if n == 0 {
+        return Ok(());
+    }
+    let auth = c.pk("freeze-authority");
+    let payer = c.pk("keeper");
+    for i in 0..n {
+        let name = format!("extra{i}");
+        let kp = solana_keypair::Keypair::new();
+        let w = solana_signer::Signer::pubkey(&kp);
+        if c.exists(&sector::trader_state(c, &w, 1)) {
+            continue;
+        }
+        c.kp.insert(name.clone(), kp);
+        let (usdc, usdt) = (c.usdc, c.usdt);
+        let mint = if i % 2 == 0 { usdc } else { usdt };
+        let mut ixs = vec![ata_ix(c, &payer, &w, &usdc), ata_ix(c, &payer, &w, &usdt)];
+        ixs.push(
+            spl_token::instruction::mint_to(&spl_token::ID, &mint, &ata(&w, &mint), &auth, &[], 100_000_000)
+                .map_err(|e| Error(e.to_string()))?,
+        );
+        c.send_ok(&ixs, "keeper", &["freeze-authority"])?;
+        let (size, cost) = (5_000_000_000u64, 50_000_000u64);
+        let t = c.send_ok(&[sector::deposit_fee(c, &w, &payer, 1, cost, size, &mint)], "keeper", &[name.as_str()])?;
+        let amount = (5 + i as u64) * 1_000_000;
+        let t2 = c.send_ok(&[sector::request_payout(c, &w, &payer, 1, amount, 1)], "keeper", &[])?;
+        c.record(
+            "S06x",
+            &format!("extra trader {i}: bought a challenge and a {} claim is queued", fmt_amount(amount)),
+            "queued",
+            "queued",
+            true,
+            Some(&t2),
+        );
+        let _ = t;
+    }
+    let vs = vault_state(c).ok_or_else(|| Error("no vault".into()))?;
+    c.record("S06x", &format!("claims in the queue: {}", vs.open_claims_count), "-", "-", true, None);
+    Ok(())
+}

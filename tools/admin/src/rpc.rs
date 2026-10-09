@@ -55,7 +55,9 @@ impl HttpRpc {
         HttpRpc { url: url.to_string(), agent }
     }
 
-    fn call(&self, method: &str, params: Value) -> Result<Value> {
+    /// One JSON-RPC call; the node's error message (never the URL) is in the `Err`. Public so other
+    /// tools (the keeper) can issue the extra read-only calls they need without a second client.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         let host = host_of(&self.url);
         let resp = self.agent.post(&self.url).send_json(body).map_err(|e| match e {

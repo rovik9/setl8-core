@@ -82,6 +82,7 @@ fn main() {
         jsonl,
         nonce: None,
         cus: vec![],
+        extra_claims: arg(&args, "--extra-claims").and_then(|v| v.parse().ok()).unwrap_or(0),
     };
     println!(
         "cluster {} | vault program {vault} | sector program {sector} | vault PDA {} | usdc {usdc} | usdt {usdt}",
@@ -98,6 +99,7 @@ fn main() {
         ("fees", steps::fees),
         ("bonds", steps::bonds),
         ("payouts", steps::payouts),
+        ("extra-claims", steps::extra_claims),
         ("reconcile", steps::reconcile),
         ("heartbeat", steps::heartbeat),
         ("withdraw", steps::withdraw),
@@ -105,6 +107,9 @@ fn main() {
         ("tool-safety", steps::tool_safety),
     ];
     let only = arg(&args, "--only");
+    // `--until <step>`: run the steps in order up to and including <step>, then stop (the keeper end-to-end
+    // test uses `--until extra-claims` to leave a queue of claims for the keeper to settle).
+    let until = arg(&args, "--until");
     for (name, f) in all {
         if only.as_deref().map(|o| o != name).unwrap_or(false) {
             continue;
@@ -112,6 +117,9 @@ fn main() {
         println!("\n===== {name} =====");
         if let Err(e) = f(&mut c) {
             c.record("ERR", name, "completes", &e.to_string(), false, None);
+            break;
+        }
+        if until.as_deref() == Some(name) {
             break;
         }
     }

@@ -95,6 +95,8 @@ pub struct Ctx {
     pub nonce: Option<Pubkey>,
     /// (instruction, vault-program CU from the logs, whole-transaction CU)
     pub cus: Vec<(String, u64, u64)>,
+    /// `--extra-claims N`: how many extra traders (generated in memory, never written anywhere) the extra-claims step adds.
+    pub extra_claims: usize,
 }
 
 pub fn ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
