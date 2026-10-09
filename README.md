@@ -71,6 +71,7 @@ programs/core-vault/src/
                       settlement.rs (pro-rata arithmetic), destination.rs (ATA checks), reconciliation.rs (tally check), reserve.rs (marketing reserve), bond.rs (bond fees and interest),
                       pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
+tools/admin/          setl8-admin: the admin signing tool (own Cargo workspace; see docs/ADMIN-TOOL.md)
 tests/                Anchor TypeScript tests + admin test keypairs
 scripts/              build, test and deploy-gate scripts (see below)
 vault-repo-spec.md    original spec for this repo
@@ -88,6 +89,10 @@ The two admin keys (SL8 and Rov) are compiled into the program as constants and 
 - `.gitignore` blocks `.env*`, `*-keypair.json`, `id.json` and `*.pem`. The only keypairs allowed in git are the public test fixtures in `tests/fixtures/*.json`.
 
 > **Decided by the founder: the revenue address stays the SL8 admin key.** `init_vault` sets `sl8_wallet = SL8_ADMIN_PUBKEY`, so SL8's share of every fee lands in token accounts owned by that one key. **Whoever holds the SL8 admin key holds the revenue and half of every bond (see Bonds), so protect it accordingly.** Its USDC and USDT token accounts must exist before any fee arrives (`docs/DEPLOY-CHECKLIST.md`).
+
+## Admin signing tool
+
+The six 2-of-2 admin instructions (`init_vault`, `register_product`, `update_product_config`, `pause_product`, `reactivate_product`, `admin_withdraw_marketing_funds`) are signed through **`tools/admin`**, the `setl8-admin` command-line tool: one side prepares a transaction file, each signer inspects it from its raw bytes and signs separately (on their own machine, with a durable nonce so the signatures may be hours apart), anyone submits. It is its own Cargo workspace (`cargo test --manifest-path tools/admin/Cargo.toml --features localnet`; `scripts/verify-admin-tool-build.sh` builds the release binary and checks it embeds the real admin keys). The ceremony step by step, key-custody options and their limits (the SL8 key currently lives in a phone wallet, which cannot sign these transactions), and what the tool does not protect against are in [`docs/ADMIN-TOOL.md`](docs/ADMIN-TOOL.md).
 
 ## Building
 
@@ -182,6 +187,7 @@ Every withdrawal logs the pool, the amount, the withdrawable amount and the rese
 - [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md): the instruction-by-instruction review, the 13 hunted bug classes, the findings list (`SR-xx`) and the compute table. Internal review, **not an audit**. SR-21 (one huge `request_payout` could lock every bond exit) and SR-03 (a frozen pool could wedge the heartbeat) are fixed. Open: SR-02 (a registered sector's payout amounts are trusted; no per-product limit is built because the sector payout mechanics are not decided) and SR-15 (who holds the upgrade authority). SR-01 (the SL8 key holder can take about half of every bond they open), SR-18 (revenue on the SL8 admin key), SR-04, SR-05 and SR-14 are accepted by the founder, with their consequences written out there.
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md): assets, actors, trust assumptions, attack trees, and what each compromise can do.
 - [`docs/DEPLOY-CHECKLIST.md`](docs/DEPLOY-CHECKLIST.md): devnet then mainnet, upgrade-authority handling, keeper duties, monitoring, incident steps.
+- [`docs/ADMIN-TOOL.md`](docs/ADMIN-TOOL.md): the admin signing ceremony (`tools/admin`).
 
 ## Design notes
 

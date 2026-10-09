@@ -6,7 +6,7 @@ Status: internal adversarial review, **not an external audit**. Written against 
 
 **Reading the tables.** `M` = writable, `S` = must sign. "Why enough" says what makes the check sufficient, not just what it is. Rounding: *floor* = rounds against the payer of the fee / in the vault's favour unless stated. Every `u128` product is of two `u64`-range values, so it cannot overflow `u128`.
 
-Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [Appendix: mutation tables](#appendix-mutation-tables)
+Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [9. The admin signing tool](#9-the-admin-signing-tool) · [Appendix: mutation tables](#appendix-mutation-tables)
 
 ---
 
@@ -452,6 +452,30 @@ These are deliberate and documented in the README; they are listed so nobody mis
 * **Key custody and operations** (hardware wallets, the upgrade authority, the deploy procedure) are covered only as a checklist (DEPLOY-CHECKLIST.md).
 * **Token-2022** is rejected by design and was not exercised beyond the rejection paths.
 
+## 9. The admin signing tool
+
+`tools/admin` (`setl8-admin`, module 5) is the signing ceremony for the six 2-of-2 admin instructions; its use is in [ADMIN-TOOL.md](ADMIN-TOOL.md). It is **not part of the program** (the program and its `.so` hashes are untouched) and it **does not change the status of any finding** in section 5. It exists because every admin instruction needs two signatures from keys that are compiled into the program (SR-14) and held on different devices, and a hostile or careless preparer of a transaction is a real risk in that setting.
+
+**What it protects against** (each is a test in `tools/admin/tests/`, and the check behind it is mutation-tested, appendix D):
+
+* *A signer being shown one thing and signing another.* `inspect` decodes the transaction from its message bytes alone; the file's description, cluster, signer list, hash and nonce are only compared against that decode, and any disagreement is a loud non-zero exit.
+* *Extra or different instructions.* A transaction is signable only if it is exactly `[AdvanceNonce]? [ComputeBudget limit/price]? Memo <one admin instruction>`, and byte-for-byte the canonical message the tool builds for the decoded contents. A System transfer, a token transfer, an unknown or non-admin vault instruction, a second admin instruction, a different program id, a wrong vault PDA or pool, a withdrawal destination that is not SL8's own associated token account (even an SL8-owned account the program itself would accept), a demoted signer flag, a reordered message, an unexpected fee payer: each is flagged, and `sign` refuses before it asks for a confirmation.
+* *Cross-cluster confusion.* The cluster's genesis hash is inside the signed bytes (a memo); `send` refuses a node on a different genesis, `plan` refuses a node that is not the named cluster, and a mainnet transaction needs `--i-understand-this-is-mainnet` **and** the typed word MAINNET (there is no `--yes` flag anywhere).
+* *Mis-signing by habit.* The signer must retype the first 8 characters of the message hash; a wrong answer signs nothing.
+* *A stale or hostile signature.* `add-signature` verifies against the message and key; a signature made before a byte changed no longer verifies; duplicate entries are not counted twice; `send` needs every required signature, valid.
+* *Withdrawals the program would refuse.* `plan` reads the live pool and refuses an amount above the 25% reserve, a frozen pool, a missing or frozen SL8 destination; `inspect --rpc` re-checks the vault's own record.
+* *Leaking a key.* The tool only reads key files, refuses one readable by group/others, never prints key material (parse errors do not echo the file), wipes key bytes after use best-effort, and replaces a panic message with a fixed line.
+* *Forgotten authorisations.* A durable-nonce signature stays valid until the nonce moves; `nonce-advance` revokes every outstanding signed transaction on it.
+
+**What it does not protect against:**
+
+* A **compromised signer machine**, or a **malicious preparer who also controls the signer's screen and the second channel**: `inspect` runs on the signer's machine, so a signer whose machine lies to them is not helped. The message-hash comparison over a second channel is the human defence.
+* A **well-formed but wrong decision**: it shows what a transaction does, it does not know whether it should be signed (which mints, which sector, how much). Known mainnet USDC/USDT mints are labelled; no other list is consulted.
+* **Key custody**: hardware wallets are not built and are an open decision; the SL8 key lives in a phone wallet that cannot sign these transactions, and because the admin keys are compiled in, the founder must be able to sign with those exact keys or redeploy (ADMIN-TOOL.md, section 5). The tool's key-file mode is only as safe as the machine holding the file.
+* The **honesty of an RPC node** for `status`, the pre-flight and `inspect --rpc` (the program re-checks everything at execution).
+* The tool itself being **swapped for a malicious build**: build it on each machine, run `scripts/verify-admin-tool-build.sh`, record and compare the hash (reproducibility is only as good as the toolchain).
+* It was tested against LiteSVM with the real program, **not on a live cluster**.
+
 ## Appendix: mutation tables
 
 ### A. Program mutants run against the tester (`fuzz_normal` only) on the final tree: 47 of 47 killed
@@ -585,3 +609,61 @@ The 47 tester mutants F01 to F47 of appendix A were run again against `fuzz_norm
 | Z13 | frozen: a (zero) transfer is still attempted from the USDC pool | killed | a_claim_is_not_under_paid_forever_by_a_pool_that_stays_frozen, both_pools_frozen_after_begin_is_also_a_clean_zero_pay, both_pools_frozen_before_begin_everything_is_processed_with_zero_pay_and_the_cycle_finalizes | 8 |
 | Z14 | frozen: a (zero) transfer is still attempted from the USDT pool | killed | a_full_batch_fits_one_legacy_transaction_and_the_compute_budget, both_pools_frozen_after_begin_is_also_a_clean_zero_pay, both_pools_frozen_before_begin_everything_is_processed_with_zero_pay_and_the_cycle_finalizes | 6 |
 | Z15 | frozen: begin never excludes a frozen USDT pool | killed | both_pools_frozen_before_begin_everything_is_processed_with_zero_pay_and_the_cycle_finalizes, fuzz_normal, usdt_frozen_before_begin_is_the_mirror_image | 3 |
+
+### D. Mutants of the admin signing tool's safety checks, run against the tool's full LiteSVM suite: 51 of 51 killed
+
+Each mutant is one deliberate bug in `tools/admin/src`, built in a scratch copy (the real tree and `programs/` were byte-identical to a pristine copy after every run). T35 and T46 first SURVIVED: the mainnet-flag pre-check in `send` was redundant with the gate (nothing asserted that the node is never contacted), and nothing tested the hash confirmation of the nonce commands. Real tests were added (`safety::sending_to_mainnet_without_the_flag_is_refused` now asserts no RPC contact; `safety::nonce_commands_need_the_hash_confirmation_too`) and both were then killed.
+
+| id | mutant | status | killed by (first failing tests) | failing |
+|---|---|---|---|---|
+| T01 | allowlist accepts a System Program transfer (extra instruction) | killed | an_extra_system_transfer_is_flagged_and_named | 1 |
+| T02 | allowlist accepts any program id | killed | a_different_program_id_in_place_of_the_vault_is_flagged, an_extra_instruction_of_an_unknown_program_is_flagged, an_spl_token_transfer_is_flagged | 3 |
+| T03 | allowlist accepts a second vault instruction | killed | a_second_admin_instruction_is_flagged | 1 |
+| T04 | allowlist accepts any ComputeBudget instruction | killed | a_compute_budget_heap_request_is_flagged, bad_key_files_are_rejected_without_echoing_their_contents | 2 |
+| T05 | allowlist accepts a memo with any text | killed | a_memo_with_other_text_or_a_second_memo_is_flagged | 1 |
+| T06 | canonical byte-for-byte comparison removed | killed | reordered_instructions_are_not_canonical | 1 |
+| T07 | genesis memo not required | killed | a_missing_genesis_memo_is_flagged | 1 |
+| T08 | message parsing not strict (trailing bytes accepted) | killed | garbage_files_are_errors_not_panics, message::tests::versioned_and_trailing_bytes_are_refused | 2 |
+| T09 | fee payer not checked | killed | a_different_fee_payer_needs_a_third_signature_and_must_be_declared, an_unexpected_fee_payer_is_flagged | 2 |
+| T10 | declared nonce need not be advanced by the message | killed | a_declared_nonce_that_the_message_does_not_advance_is_flagged | 1 |
+| T11 | vault instruction accounts not compared with the re-derived ones | killed | a_withdraw_to_a_non_sl8_destination_is_flagged, a_wrong_pool_account_is_flagged, a_wrong_vault_pda_is_flagged | 4 |
+| T12 | last account (withdraw destination) not compared | killed | a_withdraw_to_a_non_sl8_destination_is_flagged, an_sl8_owned_account_that_is_not_the_ata_is_refused_even_though_the_program_would_accept_it | 2 |
+| T13 | wrong vault PDA: derivation ignores the ROV key | killed | a_compute_budget_heap_request_is_flagged, a_corrupt_signature_string_counts_as_invalid_not_as_missing, a_declared_nonce_that_the_message_does_not_advance_is_flagged | 72 |
+| T14 | withdraw destination derived for the wrong owner (ROV instead of SL8) | killed | a_corrupt_signature_string_counts_as_invalid_not_as_missing, a_declared_nonce_that_the_message_does_not_advance_is_flagged, a_different_fee_payer_needs_a_third_signature_and_must_be_declared | 28 |
+| T15 | inspect trusts the file's genesis hash | killed | metadata_that_lies_about_the_description_cluster_signers_or_nonce_is_caught_from_the_bytes | 1 |
+| T16 | inspect trusts the file's nonce claim | killed | metadata_that_lies_about_the_description_cluster_signers_or_nonce_is_caught_from_the_bytes | 1 |
+| T17 | inspect trusts the file's message hash | killed | a_flipped_byte_with_stale_metadata_is_a_loud_mismatch, metadata_that_lies_about_the_description_cluster_signers_or_nonce_is_caught_from_the_bytes | 2 |
+| T18 | inspect trusts the file's description | killed | a_flipped_byte_with_stale_metadata_is_a_loud_mismatch, metadata_that_lies_about_the_description_cluster_signers_or_nonce_is_caught_from_the_bytes | 2 |
+| T19 | inspect trusts the file's signer list | killed | metadata_that_lies_about_the_description_cluster_signers_or_nonce_is_caught_from_the_bytes | 1 |
+| T20 | duplicate signature entries not flagged | killed | duplicate_signature_entries_do_not_count_twice | 1 |
+| T21 | invalid signature not flagged | killed | a_corrupt_signature_string_counts_as_invalid_not_as_missing | 1 |
+| T22 | signature entry of a stranger not flagged | killed | a_signature_entry_for_a_stranger_is_flagged | 1 |
+| T23 | inspect --rpc ignores a node on another cluster | killed | inspect_with_rpc_flags_a_node_on_another_cluster | 1 |
+| T24 | inspect --rpc ignores an amount above the reserve | killed | inspect_with_rpc_checks_the_mint_and_the_amount_against_the_chain | 1 |
+| T25 | inspect --rpc ignores a mint that is not the vault's | killed | inspect_with_rpc_flags_a_mint_that_is_not_the_vaults | 1 |
+| T26 | signer check removed in sign | killed | a_key_that_is_not_a_required_signer_cannot_sign | 1 |
+| T27 | message hash confirmation skipped | killed | a_wrong_confirmation_does_not_sign, no_command_output_or_file_ever_contains_key_material | 2 |
+| T28 | confirmation accepts any prefix (including empty) | killed | a_wrong_confirmation_does_not_sign | 1 |
+| T29 | signing twice allowed | killed | signing_twice_is_refused_and_leaves_one_signature | 1 |
+| T30 | add-signature does not verify the signature | killed | add_signature_accepts_a_good_one_and_rejects_every_bad_one | 1 |
+| T31 | add-signature accepts a key that is not a required signer | killed | add_signature_accepts_a_good_one_and_rejects_every_bad_one | 1 |
+| T32 | duplicate signature stored twice | killed | add_signature_accepts_a_good_one_and_rejects_every_bad_one | 1 |
+| T33 | send does not require all signatures | killed | a_single_signature_never_succeeds_not_even_with_a_forged_second_one | 1 |
+| T34 | genesis check skipped in send | killed | a_devnet_transaction_is_refused_by_a_node_on_another_cluster | 1 |
+| T35 | mainnet flag check skipped in send | killed | sending_to_mainnet_without_the_flag_is_refused | 1 |
+| T36 | mainnet gate skipped in send | killed | flag_and_word_together_send_to_mainnet, the_flag_alone_is_not_enough_the_word_must_be_typed | 2 |
+| T37 | mainnet typed word not required | killed | the_flag_alone_is_not_enough_the_word_must_be_typed | 1 |
+| T38 | mainnet gate does not need the flag | killed | nonce_commands_on_mainnet_need_the_gate_too | 1 |
+| T39 | failed simulation ignored by send | killed | a_recent_blockhash_transaction_dies_with_the_window, nonce_advance_revokes_a_signed_but_unsent_transaction | 2 |
+| T40 | reserve pre-flight removed | killed | plan_refuses_an_amount_above_what_the_25_percent_reserve_leaves | 1 |
+| T41 | frozen-pool pre-flight removed | killed | plan_pre_flight_refusals | 1 |
+| T42 | frozen SL8 destination pre-flight removed | killed | plan_pre_flight_refusals | 1 |
+| T43 | plan does not cross-check the node's genesis hash | killed | plan_refuses_a_node_whose_genesis_is_not_the_named_cluster | 1 |
+| T44 | nonce authority not checked in nonce-advance | killed | only_the_nonce_authority_can_advance | 1 |
+| T45 | nonce commands skip the cluster check | killed | nonce_commands_check_the_cluster_too | 1 |
+| T46 | nonce commands skip the hash confirmation | killed | nonce_commands_need_the_hash_confirmation_too | 1 |
+| T47 | key-file permission check removed | killed | a_key_file_readable_by_others_is_refused, bad_key_files_are_rejected_without_echoing_their_contents, nonce_commands_apply_the_same_key_file_rule | 3 |
+| T48 | secret printed in an error path (parser message echoed) | killed | bad_key_files_are_rejected_without_echoing_their_contents | 1 |
+| T49 | status reports the whole balance as withdrawable | killed | status_reports_the_exact_numbers | 1 |
+| T50 | status headroom ignores the open claims | killed | status_reports_the_exact_numbers, status_shows_a_frozen_pool_and_a_pool_at_the_claims_ceiling | 2 |
+| T51 | amount parser accepts a seventh decimal | killed | bad_key_files_are_rejected_without_echoing_their_contents, every_command_has_help_and_the_error_paths_are_clean, fmt::tests::bad_amounts_are_refused | 3 |
