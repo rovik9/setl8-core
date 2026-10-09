@@ -15,10 +15,19 @@
 //! Both keys are part of the `VaultState` PDA seeds, so the real build and the
 //! localnet build derive DIFFERENT vault PDAs. Nothing may hardcode a vault PDA.
 //!
-//! **OPEN PRE-DEPLOY DECISION (revenue destination):** `init_vault` sets
+//! **RESOLVED (revenue destination), by founder decision:** `init_vault` sets
 //! `VaultState::sl8_wallet = SL8_ADMIN_PUBKEY`, so SL8's share of every fee lands
-//! in token accounts owned by the SL8 admin key itself. Consider a separate
-//! treasury key set via `init_vault` instead. Deliberately unchanged for now.
+//! in token accounts owned by the SL8 admin key itself, and the revenue address
+//! stays that key (SR-18, accepted). There is no treasury argument and no
+//! `set_treasury` instruction.
+//!
+//! **Consequence:** whoever holds that one key holds the revenue (the fee
+//! remainder and all bond fees) AND, through SR-01, half of every bond (SL8's
+//! half of each principal lands in its token accounts, and a bond withdrawal is
+//! paid back in full from the pool). Protect it accordingly: hardware wallet,
+//! tested backup, routine sweeps to cold storage. The SL8 admin key's USDC and
+//! USDT token accounts must exist BEFORE any fee arrives, or `deposit_fee`,
+//! `deposit_reset` and `deposit_bond` fail (docs/DEPLOY-CHECKLIST.md).
 
 use anchor_lang::prelude::*;
 
@@ -27,8 +36,8 @@ use anchor_lang::prelude::*;
 /// `pause_product`, `reactivate_product`, `admin_withdraw_marketing_funds`).
 ///
 /// REAL key: founder-held, hardware/phone wallet. Must never be a funds
-/// destination except SL8 as `sl8_wallet` (see the open decision in the module
-/// docs).
+/// destination except SL8 as `sl8_wallet` (see the resolved decision and its
+/// consequence in the module docs).
 #[cfg(not(feature = "localnet"))]
 pub const SL8_ADMIN_PUBKEY: Pubkey = pubkey!("SL89fcsKAuWYtkEJah86WLLBxCiHd1DeNczpsDjSHDJ");
 
