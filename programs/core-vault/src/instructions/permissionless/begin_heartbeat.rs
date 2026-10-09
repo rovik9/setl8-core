@@ -4,6 +4,7 @@ use anchor_spl::token::TokenAccount;
 use crate::constants::{HEARTBEAT_MIN_GAP_SECS, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED};
 use crate::errors::VaultError;
 use crate::state::VaultState;
+use crate::utils::available_snapshot;
 
 #[derive(Accounts)]
 pub struct BeginHeartbeat<'info> {
@@ -25,7 +26,7 @@ pub struct BeginHeartbeat<'info> {
 }
 
 /// Permissionless. Opens a heartbeat cycle and freezes its inputs: the total owed
-/// and the total available (both pools) are snapshotted, so every claim in the
+/// and the total available (both pools, a FROZEN pool counting as empty) are snapshotted, so every claim in the
 /// cycle is settled with the same ratio no matter the order it is processed in.
 ///
 /// At most one cycle at a time, and at least `HEARTBEAT_MIN_GAP_SECS` between the
@@ -34,12 +35,15 @@ pub struct BeginHeartbeat<'info> {
 /// `finalize_heartbeat` closes the cycle.
 pub fn begin_heartbeat(ctx: Context<BeginHeartbeat>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
-    let available = ctx
-        .accounts
-        .usdc_pool
-        .amount
-        .checked_add(ctx.accounts.usdt_pool.amount)
-        .ok_or(VaultError::MathOverflow)?;
+    // A pool the issuer has frozen cannot pay anything, so it is left out of what is
+    // "available" (SR-03). Otherwise the cycle's ratio would count money that cannot move
+    // and every claim would be under-paid for the whole cycle.
+    let available = available_snapshot(
+        ctx.accounts.usdc_pool.amount,
+        ctx.accounts.usdc_pool.is_frozen(),
+        ctx.accounts.usdt_pool.amount,
+        ctx.accounts.usdt_pool.is_frozen(),
+    )?;
 
     let vs = &mut ctx.accounts.vault_state;
     require!(!vs.cycle_active, VaultError::CycleInProgress);

@@ -63,6 +63,39 @@ pub fn plan_settlement(owed: u64, num: u64, den: u64, usdc_balance: u64, usdt_ba
     })
 }
 
+/// What a pool can pay out right now: its balance, or 0 if the issuer has FROZEN the pool
+/// token account (SR-03). A frozen account cannot send tokens, so counting it would make every
+/// `settle_claims` that touched it revert and wedge the cycle. Treating it as empty means
+/// claims are paid from the other pool only, or carry over unpaid if both are frozen.
+pub fn spendable(balance: u64, frozen: bool) -> u64 {
+    if frozen {
+        0
+    } else {
+        balance
+    }
+}
+
+/// The `available` figure `begin_heartbeat` snapshots: both pools' spendable balances.
+pub fn available_snapshot(usdc_balance: u64, usdc_frozen: bool, usdt_balance: u64, usdt_frozen: bool) -> Result<u64> {
+    spendable(usdc_balance, usdc_frozen)
+        .checked_add(spendable(usdt_balance, usdt_frozen))
+        .ok_or_else(|| error!(VaultError::MathOverflow))
+}
+
+/// `plan_settlement` over the pools' LIVE state: a frozen pool counts as empty, so no leg is
+/// ever planned from it (and no transfer is attempted). Both frozen -> a zero payment.
+pub fn plan_settlement_with_frozen(
+    owed: u64,
+    num: u64,
+    den: u64,
+    usdc_balance: u64,
+    usdc_frozen: bool,
+    usdt_balance: u64,
+    usdt_frozen: bool,
+) -> Result<Settlement> {
+    plan_settlement(owed, num, den, spendable(usdc_balance, usdc_frozen), spendable(usdt_balance, usdt_frozen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +213,59 @@ mod tests {
         let s = check(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
         assert_eq!(s.total(), u64::MAX);
         assert_eq!(s.from_usdc, u64::MAX); // tie -> USDC first
+    }
+
+    // ------------------------------------------------------------------ frozen pools (SR-03)
+
+    #[test]
+    fn a_frozen_pool_counts_as_empty_exhaustively_on_a_small_grid() {
+        for owed in 0..=11u64 {
+            for den in 1..=7u64 {
+                for num in 0..=den {
+                    for usdc in 0..=8u64 {
+                        for usdt in 0..=8u64 {
+                            for (fu, ft) in [(false, false), (true, false), (false, true), (true, true)] {
+                                let s = plan_settlement_with_frozen(owed, num, den, usdc, fu, usdt, ft).unwrap();
+                                if fu {
+                                    assert_eq!(s.from_usdc, 0, "a leg came from a frozen USDC pool");
+                                }
+                                if ft {
+                                    assert_eq!(s.from_usdt, 0, "a leg came from a frozen USDT pool");
+                                }
+                                // identical to planning over the spendable balances only
+                                let e = plan_settlement(owed, num, den, if fu { 0 } else { usdc }, if ft { 0 } else { usdt }).unwrap();
+                                assert_eq!(s, e);
+                                let pay = s.total() as u128;
+                                assert!(pay <= owed as u128);
+                                let target = owed as u128 * num as u128 / den as u128;
+                                let live = (if fu { 0 } else { usdc } as u128) + (if ft { 0 } else { usdt } as u128);
+                                assert_eq!(pay, target.min(live));
+                                if fu && ft {
+                                    assert_eq!(pay, 0, "both frozen pays nothing and does not fail");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_snapshot_excludes_a_frozen_pool() {
+        assert_eq!(available_snapshot(30, false, 20, false).unwrap(), 50);
+        assert_eq!(available_snapshot(30, true, 20, false).unwrap(), 20);
+        assert_eq!(available_snapshot(30, false, 20, true).unwrap(), 30);
+        assert_eq!(available_snapshot(30, true, 20, true).unwrap(), 0);
+        assert!(available_snapshot(u64::MAX, false, 1, false).is_err(), "still checked");
+        assert_eq!(available_snapshot(u64::MAX, true, 1, false).unwrap(), 1, "a frozen pool never overflows the sum");
+    }
+
+    #[test]
+    fn a_thawed_pool_is_back_in_the_arithmetic() {
+        let frozen = plan_settlement_with_frozen(10, 1, 1, 6, true, 4, false).unwrap();
+        assert_eq!(frozen, Settlement { from_usdc: 0, from_usdt: 4 });
+        let thawed = plan_settlement_with_frozen(10, 1, 1, 6, false, 4, false).unwrap();
+        assert_eq!(thawed, Settlement { from_usdc: 6, from_usdt: 4 });
     }
 }

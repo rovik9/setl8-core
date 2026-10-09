@@ -7,7 +7,8 @@ use crate::constants::{
 use crate::errors::VaultError;
 use crate::state::{PayoutClaim, VaultState, CLAIM_KIND_BOND, CLAIM_KIND_TRADER};
 use crate::utils::{
-    self, associated_token_address, close_pda_account, cycle_ratio, destination_usable, plan_settlement, write_account,
+    self, associated_token_address, close_pda_account, cycle_ratio, destination_usable, plan_settlement_with_frozen,
+    write_account,
 };
 
 #[derive(Accounts)]
@@ -49,6 +50,11 @@ pub struct SettleClaims<'info> {
 /// claim for the next cycle; a claim paid in full is closed and its rent goes to
 /// the caller. A claim whose (correctly addressed) destinations are unusable is
 /// SKIPPED: it counts as processed for this cycle but stays open and owed.
+///
+/// A pool the issuer has FROZEN counts as empty (SR-03): legs come only from the other
+/// pool and no transfer is ever attempted from a frozen account, so a freeze cannot make
+/// this instruction revert. If both pools are frozen every claim is processed with a zero
+/// payment (it carries over and the cycle can still finalize).
 ///
 /// A WRONG destination address is a hard error instead: the whole transaction
 /// reverts, so nobody can mark someone else's claim processed by passing garbage.
@@ -130,7 +136,18 @@ fn settle_one<'info>(
     // ---- pay, from the LIVE pool balances (they can change during a cycle)
     a.usdc_pool.reload()?;
     a.usdt_pool.reload()?;
-    let plan = plan_settlement(claim.owed, num, den, a.usdc_pool.amount, a.usdt_pool.amount)?;
+    // A frozen pool counts as empty (SR-03): no leg is planned from it, so no transfer is
+    // attempted and the batch cannot revert on it. Both frozen -> a zero payment: the claim
+    // is processed and carries over.
+    let plan = plan_settlement_with_frozen(
+        claim.owed,
+        num,
+        den,
+        a.usdc_pool.amount,
+        a.usdc_pool.is_frozen(),
+        a.usdt_pool.amount,
+        a.usdt_pool.is_frozen(),
+    )?;
     if plan.from_usdc > 0 {
         transfer_from_pool(a, true, usdc_ata, plan.from_usdc)?;
     }

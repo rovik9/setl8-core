@@ -13,32 +13,51 @@ use solana_signer::Signer;
 
 const M: u64 = 1_000_000;
 
-/// SR-21 (HIGH, needs a founder decision; a tested fix is in
-/// docs/proposed-fixes/SR-21-claims-ceiling.patch). `request_payout` accepts any `u64`
-/// amount, so ONE request of about `u64::MAX` (a sector bug or a malicious sector)
-/// saturates `open_claims_total`. From then on every `request_bond_payout` and every
-/// `request_payout` of any product fails with `MathOverflow`, and the bond holder's
-/// principal stays locked in until that claim is paid down. The existing test
-/// `payout_claims::the_total_cannot_overflow_u64` pins that the huge request itself is
-/// accepted, which is why the fix is a proposal and not applied here.
+/// SR-21 (FIXED in module 4b). `request_payout` used to accept any `u64` amount, so ONE
+/// request of about `u64::MAX` saturated `open_claims_total` and every later
+/// `request_bond_payout` / `request_payout` failed with `MathOverflow`, locking bond
+/// principal in. This test used to pin that failure (and `payout_claims::
+/// the_total_cannot_overflow_u64` pinned the acceptance of the huge request). It is FLIPPED
+/// to assert the fix: the $2.5M ceiling refuses the huge request, so the bond holder can
+/// exit and ordinary requests keep working. The boundary tests are in `claims_ceiling.rs`.
+/// What remains open is SR-02: a sector can still fill the $2.5M headroom and block new
+/// requests until the pool pays the total down.
 #[test]
-fn sr21_one_huge_request_locks_every_bond_exit_and_every_other_request() {
+fn sr21_one_huge_request_no_longer_locks_bond_exits_or_other_requests() {
     let (mut e, s) = Env::registered(&Cfg { max_payout: 3, ..Cfg::default() });
     let k = e.new_depositor();
     e.make_atas(&k.pubkey());
     e.bond_deposit(&k, 0, 100 * M, BondTerm::SixMonths, Coin::Usdc);
     let w = wallet();
     e.deposit(&s, &w, 1);
-    e.payout(&s, &w, 1, u64::MAX - 5, 1); // accepted today
-    assert_eq!(e.vault_state().open_claims_total, u64::MAX - 5);
+    let ix = payout_ix(&e, &s, &w, 1, u64::MAX - 5, 1);
+    assert_vault_err(&e.send(ix), VaultError::ClaimsCeilingExceeded); // refused now
+    assert_eq!(e.vault_state().open_claims_total, 0);
 
-    e.advance(BOND_6M_LOCK_SECS); // the bond is now withdrawable ...
-    assert_vault_err(&e.bond_request_result(&k, 0), VaultError::MathOverflow); // ... but cannot be
-    assert!(e.bond(&k.pubkey(), 0).is_some(), "the principal is still locked in the position");
+    e.advance(BOND_6M_LOCK_SECS);
+    e.bond_request(&k, 0); // the bond holder exits
+    assert!(e.bond(&k.pubkey(), 0).is_none());
     let w2 = wallet();
     e.deposit(&s, &w2, 1);
-    let ix = payout_ix(&e, &s, &w2, 1, 10, 1);
-    assert_vault_err(&e.send(ix), VaultError::MathOverflow); // an ordinary request fails too
+    e.payout(&s, &w2, 1, 10, 1); // and an ordinary request still works
+}
+
+/// SR-02 stays OPEN (the founder has not decided the sector payout mechanics): a registered
+/// sector can still queue a claim up to the $2.5M ceiling, i.e. fill the headroom, and while
+/// it stays unpaid every new request, bond exits included, is refused with
+/// `ClaimsCeilingExceeded` until a heartbeat pays the total down.
+#[test]
+fn sr02_a_sector_can_still_fill_the_headroom_and_block_new_requests_until_it_is_paid_down() {
+    let (mut e, s) = Env::registered(&Cfg { max_payout: 3, ..Cfg::default() });
+    let k = e.new_depositor();
+    e.make_atas(&k.pubkey());
+    e.bond_deposit(&k, 0, 100 * M, BondTerm::SixMonths, Coin::Usdc);
+    let w = wallet();
+    e.deposit(&s, &w, 1);
+    e.payout(&s, &w, 1, 2_500_000 * M, 1); // the whole ceiling
+    e.advance(BOND_6M_LOCK_SECS);
+    assert_vault_err(&e.bond_request_result(&k, 0), VaultError::ClaimsCeilingExceeded);
+    assert!(e.bond(&k.pubkey(), 0).is_some(), "the principal waits in its position, nothing is lost");
 }
 
 /// SR-01. ONE key (the SL8 admin key) turns its own bond into pool money. SL8's token
@@ -105,29 +124,27 @@ fn sr02_a_registered_sector_can_queue_an_arbitrary_amount() {
     assert!(h < M / 5, "the honest 100 USDC claim got {h} base units");
 }
 
-/// SR-03. If the issuer freezes a payout POOL token account, every `settle_claims`
-/// that needs it reverts, the cycle can never finish, and nothing in the program can
-/// recover (no force-finalize, no skip). Only a program upgrade could.
+/// SR-03 (FIXED in module 4b). If the issuer freezes a payout POOL token account, the
+/// heartbeat treats it as empty instead of reverting: `begin_heartbeat` leaves it out of the
+/// available snapshot and `settle_claims` pays from the other pool only (both frozen -> a
+/// zero payment). This test used to pin the wedge (settle reverted with AccountFrozen, the
+/// cycle could never finish); it is FLIPPED to assert the fix. The full matrix (USDC, USDT,
+/// both, before begin, between begin and settle, between batches, thaw) is in
+/// `frozen_pools.rs`.
 #[test]
-fn sr03_a_frozen_pool_wedges_the_heartbeat() {
+fn sr03_a_frozen_pool_no_longer_wedges_the_heartbeat() {
     let (mut e, s) = Env::registered(&Cfg::default());
-    let (_, t) = {
-        let (w, _) = e.queue_claim(&s, 100 * M);
-        e.make_atas(&w);
-        (w, triple(&e, &s, &w, 1, 1))
-    };
+    let (w, _) = e.queue_claim(&s, 100 * M);
+    e.make_atas(&w);
+    let t = triple(&e, &s, &w, 1, 1);
     e.set_pool(Coin::Usdc, 1_000 * M);
     let pool = e.usdc_pool;
     e.edit_token_account(&pool, |a| a.state = AccountState::Frozen);
     e.begin();
-    let r = e.settle_result(&[t]);
-    assert_custom_code(&r, 17, "token program: AccountFrozen");
-    assert_vault_err(&e.finalize_result(), VaultError::CycleIncomplete);
-    e.advance(30 * 86_400);
-    assert_custom_code(&e.settle_result(&[t]), 17, "still frozen a month later");
-    assert_vault_err(&e.finalize_result(), VaultError::CycleIncomplete);
-    assert_vault_err(&e.begin_result(), VaultError::CycleInProgress);
-    assert!(e.vault_state().cycle_active, "the cycle is stuck open");
+    e.settle(&[t]); // no revert: the frozen pool counts as empty, the claim carries over
+    assert_eq!(e.claim(&s, &w, 1, 1).owed, 100 * M);
+    e.finalize(); // the cycle finishes
+    assert!(!e.vault_state().cycle_active);
 }
 
 /// SR-04. A claim needs BOTH of the trader's associated accounts to be usable even

@@ -367,6 +367,10 @@ fn a_claim_made_during_an_open_cycle_waits_for_the_next() {
 
 #[test]
 fn counters_cannot_go_negative_or_overflow() {
+    // Module 4b (listed adaptation): the "claim total at the maximum" tamper used to reach the
+    // checked add and fail with MathOverflow. The claims ceiling (SR-21) is now checked first
+    // and refuses with ClaimsCeilingExceeded; the add itself can no longer be reached with a
+    // total that high. The other four cases are unchanged (still MathOverflow).
     let cases: Vec<(&str, Box<dyn Fn(&mut Env, &Keypair)>)> = vec![
         ("tracker total below the position", Box::new(|e, k| {
             let t = e.tracker_of(&k.pubkey()).unwrap();
@@ -384,8 +388,8 @@ fn counters_cannot_go_negative_or_overflow() {
         e.advance(LOCK6);
         tamper(&mut e, &k);
         let ix = request_bond_payout_ix(&e, &k.pubkey(), 0);
-        assert_rejected(&mut e, &k, ix, |r| assert_vault_err(r, VaultError::MathOverflow));
-        let _ = label;
+        let want = if label == "claim total at the maximum" { VaultError::ClaimsCeilingExceeded } else { VaultError::MathOverflow };
+        assert_rejected(&mut e, &k, ix, |r| assert_vault_err(r, want));
     }
 }
 

@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{BOND_CAP_SEED, BOND_CLAIM_SEED, BOND_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED};
+use crate::constants::{
+    BOND_CAP_SEED, BOND_CLAIM_SEED, BOND_SEED, OPEN_CLAIMS_CEILING, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, VAULT_STATE_SEED,
+};
 use crate::errors::VaultError;
 use crate::state::{BondCapTracker, BondPosition, PayoutClaim, VaultState, CLAIM_KIND_BOND};
 use crate::utils::{close_pda_account, create_pda_account_with, plan_withdrawal, write_account};
@@ -54,7 +56,8 @@ pub struct RequestBondPayout<'info> {
 /// (rounded up) comes off the gross amount: no tokens move now, so the fee is
 /// simply not owed and stays in the pool (`bond_withdrawal_fees_retained` tracks
 /// it). The position is closed here, so it can never be withdrawn twice, and the
-/// wallet's cap room is freed.
+/// wallet's cap room is freed. It is refused with `ClaimsCeilingExceeded` (changing nothing) if the
+/// claim would take the vault's open claims above `OPEN_CLAIMS_CEILING`.
 pub fn request_bond_payout(ctx: Context<RequestBondPayout>, deposit_index: u64) -> Result<()> {
     let depositor = ctx.accounts.depositor.key();
     let position = read_position(&ctx.accounts.bond_position, &depositor, deposit_index)?;
@@ -67,6 +70,12 @@ pub fn request_bond_payout(ctx: Context<RequestBondPayout>, deposit_index: u64) 
     require!(plan.net > 0, VaultError::ZeroAmount);
 
     let vs = &mut ctx.accounts.vault_state;
+    // The same ceiling as `request_payout` (SR-21): a bond exit is refused, cleanly and
+    // retryably, while trader claims fill the headroom. Written so it cannot overflow.
+    require!(
+        plan.net <= OPEN_CLAIMS_CEILING.saturating_sub(vs.open_claims_total),
+        VaultError::ClaimsCeilingExceeded
+    );
     tracker.open_principal_total =
         tracker.open_principal_total.checked_sub(position.principal).ok_or(VaultError::MathOverflow)?;
     vs.bond_principal_open_total =

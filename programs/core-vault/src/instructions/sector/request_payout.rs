@@ -3,8 +3,8 @@ use anchor_lang::solana_program::program::set_return_data;
 use setl8_shared_interfaces::PayoutOutcome;
 
 use crate::constants::{
-    PAYOUT_CLAIM_SEED, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED,
-    VAULT_STATE_SEED,
+    OPEN_CLAIMS_CEILING, PAYOUT_CLAIM_SEED, PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY,
+    TRADER_STATE_SEED, VAULT_STATE_SEED,
 };
 use crate::errors::VaultError;
 use crate::state::{CLAIM_KIND_TRADER, PayoutClaim, ProductRegistry, TraderState, TraderStatus, VaultState};
@@ -82,6 +82,11 @@ pub struct RequestPayout<'info> {
 /// and the product's `total_requests_emitted` / `total_requested_amount` (the
 /// numbers `reconcile_product` compares with the sector's tally) grow too. The claim is created last, after every check, by hand (see
 /// `payout_claim`).
+///
+/// Checks, in order (the stale path returns `Ok` before the cap and id checks): product
+/// active, `amount > 0`, status `Active`, stale -> `Abandoned`, `payout_count <
+/// max_payout_count`, `proposed_request_id == payout_count + 1`, **`amount` fits under
+/// `OPEN_CLAIMS_CEILING` (`ClaimsCeilingExceeded`)**, then the checked additions.
 pub fn request_payout(
     ctx: Context<RequestPayout>,
     trader_wallet: Pubkey,
@@ -114,6 +119,15 @@ pub fn request_payout(
     require!(proposed_request_id == expected_request_id, VaultError::RequestIdMismatch);
 
     let vs = &mut ctx.accounts.vault_state;
+    // Claims ceiling (SR-21): a sector chooses `amount`, and `open_claims_total` is a u64 that
+    // `request_bond_payout` also adds to. Without a ceiling one request of about u64::MAX
+    // makes every later checked add overflow and locks the bond holders in. The same
+    // ceiling guards `request_bond_payout`. Written so it cannot itself overflow
+    // (`saturating_sub`, no addition).
+    require!(
+        amount <= OPEN_CLAIMS_CEILING.saturating_sub(vs.open_claims_total),
+        VaultError::ClaimsCeilingExceeded
+    );
     let open_claims_count = vs.open_claims_count.checked_add(1).ok_or(VaultError::MathOverflow)?;
     let open_claims_total = vs.open_claims_total.checked_add(amount).ok_or(VaultError::MathOverflow)?;
 

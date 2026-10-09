@@ -161,4 +161,13 @@ pub enum VaultError {
     /// is the only guard on the amount. See the README's security model.
     #[msg("withdrawal exceeds what the pool's 25% reserve leaves available")]
     WithdrawalExceedsReserve,
+
+    /// A `request_payout` or `request_bond_payout` would take
+    /// `VaultState::open_claims_total` above `OPEN_CLAIMS_CEILING` ($2,500,000). It
+    /// stops a single huge request from saturating the `u64` counter (which used to
+    /// lock every later request, bond exits included) and bounds what the vault can
+    /// owe. Refused requests change nothing; they succeed again once heartbeat
+    /// payments bring the total down. Appended last so no earlier error code moves.
+    #[msg("this request would take the vault's open claims above the hard ceiling")]
+    ClaimsCeilingExceeded,
 }

@@ -70,3 +70,39 @@ pub const BOND_9M_TERM_SECS: i64 = 23_328_000;
 /// Hard lock of the nine-month bond: half the term (135 days).
 pub const BOND_9M_LOCK_SECS: i64 = 11_664_000;
 pub const BOND_9M_INTEREST_BPS: u16 = 3_000;
+
+/// Hard ceiling on `VaultState::open_claims_total`, the sum owed on every open claim:
+/// 2_500_000_000_000 base units = $2,500,000 at 6 decimals.
+///
+/// It limits the total the vault can ever owe and so prevents overflow lock-outs: the
+/// counter is a `u64` and a sector chooses each amount, so without a ceiling one huge
+/// request makes every later `checked_add` overflow and locks bond withdrawals (SR-21).
+/// Bonds alone can owe up to $780,000 (the $600,000 global cap plus 30% interest), which
+/// leaves about $1,720,000 of headroom for trader claims.
+///
+/// It bounds the damage a buggy or malicious sector can do, but it is NOT a complete
+/// protection (SR-02 stays open): a sector can still fill the headroom, and then every
+/// new `request_payout` and `request_bond_payout` is refused with `ClaimsCeilingExceeded`
+/// until the pool pays the total down. Raising it requires a program upgrade; no
+/// admin-adjustable version is built.
+///
+/// Enforced by both `request_payout` and `request_bond_payout`.
+pub const OPEN_CLAIMS_CEILING: u64 = 2_500_000_000_000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_claims_ceiling_is_two_and_a_half_million_dollars_and_leaves_room_for_every_bond() {
+        assert_eq!(OPEN_CLAIMS_CEILING, 2_500 * 1_000 * 1_000_000);
+        // bonds alone: the global cap with the larger (30%) interest
+        let bond_claims = BOND_GLOBAL_CAP as u128 * 130 / 100;
+        assert_eq!(bond_claims, 780_000_000_000);
+        assert!(bond_claims < OPEN_CLAIMS_CEILING as u128);
+        // headroom left for trader claims: about $1,720,000
+        assert_eq!(OPEN_CLAIMS_CEILING as u128 - bond_claims, 1_720_000_000_000);
+        // far from u64 overflow even with every bond added on top of the ceiling
+        assert!((OPEN_CLAIMS_CEILING as u128) + bond_claims < u64::MAX as u128);
+    }
+}

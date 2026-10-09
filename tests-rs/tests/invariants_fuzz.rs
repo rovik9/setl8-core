@@ -92,6 +92,11 @@ const BOND_MIN: u64 = 50_000_000;
 const BOND_WALLET_CAP: u64 = 50_000_000_000;
 const BOND_GLOBAL_CAP: u64 = 600_000_000_000;
 const D: i64 = 86_400;
+/// request_payout and request_bond_payout refuse to take the open claims above this (SR-21):
+/// $2,500,000 = 2_500_000_000_000 base units (restated here, not imported).
+const CLAIMS_CEILING: u64 = 2_500_000_000_000;
+/// spl-token TokenError::AccountFrozen: what a transfer into / out of a frozen pool returns.
+const FROZEN_CODE: u32 = 17;
 
 fn term_secs(t: BondTerm) -> (i64, i64, u64) {
     // (term, hard lock, interest bps)
@@ -336,6 +341,9 @@ struct Model {
     ata_mode: Vec<[AtaMode; 2]>,
     /// supply per coin: moves only on test-side mint / delete events
     supply: [i128; 2],
+    /// which payout pools the issuer has frozen (SR-03): a frozen pool counts as empty for the
+    /// heartbeat, and transfers into / out of it fail in the token program
+    frozen: [bool; 2],
     floors: [u64; 2],
     floor_updated_at: i64,
     withdrawn: [u64; 2],
@@ -417,6 +425,7 @@ enum Act {
     Airdrop { p: usize, c: usize, amount: u64 },
     Dust { addr: Pubkey, lamports: u64, what: &'static str },
     SetTally { s: usize, t: Tally },
+    PoolFreeze { c: usize, frozen: bool },
 }
 
 impl Act {
@@ -444,6 +453,7 @@ impl Act {
             Act::Airdrop { .. } => "env:airdrop",
             Act::Dust { .. } => "env:dust",
             Act::SetTally { .. } => "env:tally",
+            Act::PoolFreeze { .. } => "env:freeze",
         }
     }
     fn is_program_ix(&self) -> bool {
@@ -467,6 +477,14 @@ impl Model {
     }
     fn bond_open_total(&self) -> u64 {
         self.bonds.values().map(|b| b.principal).sum()
+    }
+    /// What pool `i` can pay out now: 0 when frozen.
+    fn spend(&self, i: usize) -> u64 {
+        if self.frozen[i] {
+            0
+        } else {
+            self.pools[i]
+        }
     }
     fn ata_usable(&self, p: usize) -> bool {
         self.ata_mode[p][0] == AtaMode::Usable && self.ata_mode[p][1] == AtaMode::Usable
@@ -546,6 +564,10 @@ impl Model {
                 if !e.is_empty() {
                     return Err(e);
                 }
+                if self.frozen[*c] {
+                    // the transfer out of a frozen pool fails inside the token program
+                    return Err(vec![E::C(FROZEN_CODE)]);
+                }
                 m.pools[*c] -= amount;
                 m.sl8[*c] += amount;
                 m.withdrawn[*c] += amount;
@@ -567,6 +589,10 @@ impl Model {
                 }
                 if !e.is_empty() {
                     return Err(e);
+                }
+                if self.frozen[*c] && floor_bps(*cost, pr.cfg.fee_bps as u64) > 0 {
+                    // the pool leg fails inside the token program (a zero leg is skipped)
+                    return Err(vec![E::C(FROZEN_CODE)]);
                 }
                 let paused_now = pr.paused_secs_at(now);
                 let bps = pr.cfg.fee_bps as u64;
@@ -610,6 +636,9 @@ impl Model {
                 }
                 if !e.is_empty() {
                     return Err(e);
+                }
+                if self.frozen[*c] && floor_bps(*amount, pr.cfg.fee_bps as u64) > 0 {
+                    return Err(vec![E::C(FROZEN_CODE)]);
                 }
                 let paused_now = pr.paused_secs_at(now);
                 let bps = pr.cfg.fee_bps as u64;
@@ -688,7 +717,11 @@ impl Model {
                     if *req != t.payout_count + 1 {
                         return Err(vec![ev(VaultError::RequestIdMismatch)]);
                     }
-                    if self.claims_total() + *amount as u128 > u64::MAX as u128 || pr.amount as u128 + *amount as u128 > u64::MAX as u128 {
+                    // the ceiling guard comes before the checked additions
+                    if *amount as u128 > (CLAIMS_CEILING as u128).saturating_sub(self.claims_total()) {
+                        return Err(vec![ev(VaultError::ClaimsCeilingExceeded)]);
+                    }
+                    if pr.amount as u128 + *amount as u128 > u64::MAX as u128 {
                         return Err(vec![ev(VaultError::MathOverflow)]);
                     }
                     let tm = m.traders.get_mut(&(*s, *p, *cid)).unwrap();
@@ -729,7 +762,7 @@ impl Model {
                     started: now,
                     active: true,
                     owed: self.claims_total() as u64,
-                    avail: self.pools[0] + self.pools[1],
+                    avail: self.spend(0) + self.spend(1),
                     eligible: self.claims.len() as u64,
                     processed: 0,
                 };
@@ -778,10 +811,10 @@ impl Model {
                         continue;
                     }
                     let target = c.owed as u128 * num as u128 / den as u128;
-                    let live = m.pools[0] as u128 + m.pools[1] as u128;
+                    let live = m.spend(0) as u128 + m.spend(1) as u128;
                     let pay = target.min(live) as u64;
-                    let usdc_first = m.pools[0] >= m.pools[1];
-                    let first_bal = if usdc_first { m.pools[0] } else { m.pools[1] };
+                    let usdc_first = m.spend(0) >= m.spend(1);
+                    let first_bal = if usdc_first { m.spend(0) } else { m.spend(1) };
                     let from_first = pay.min(first_bal);
                     let from_second = pay - from_first;
                     let (u, t) = if usdc_first { (from_first, from_second) } else { (from_second, from_first) };
@@ -854,6 +887,9 @@ impl Model {
                 if !e.is_empty() {
                     return Err(e);
                 }
+                if self.frozen[*c] {
+                    return Err(vec![E::C(FROZEN_CODE)]); // the pool leg (half the principal) fails
+                }
                 let pool = floor_bps(*principal, 5_000);
                 m.wallet[*p][*c] -= *principal + fee;
                 m.pools[*c] += pool;
@@ -877,9 +913,9 @@ impl Model {
                 let gross = if age >= term { b.principal + floor_bps(b.principal, bps) } else { b.principal };
                 let fee = ceil_bps(gross, 20);
                 let net = gross - fee;
-                // the claim is added to open_claims_total with a checked add
-                if self.claims_total() + net as u128 > u64::MAX as u128 {
-                    return Err(vec![ev(VaultError::MathOverflow)]);
+                // the claims ceiling applies to bond exits too (refused cleanly, retryable)
+                if net as u128 > (CLAIMS_CEILING as u128).saturating_sub(self.claims_total()) {
+                    return Err(vec![ev(VaultError::ClaimsCeilingExceeded)]);
                 }
                 let principal = b.principal;
                 m.trackers.get_mut(p).unwrap().open -= principal;
@@ -914,6 +950,7 @@ impl Model {
             }
             Act::Dust { .. } => {}
             Act::SetTally { s, t } => m.tallies[*s] = *t,
+            Act::PoolFreeze { c, frozen } => m.frozen[*c] = *frozen,
         }
         Ok(Stepped { m, out, evs })
     }
@@ -1074,6 +1111,7 @@ impl Fuzz {
             ata_bal: vec![[0, 0]; NP],
             ata_mode: vec![[AtaMode::Absent, AtaMode::Absent]; NP],
             supply: [(0..NP).map(|p| start(p) as i128).sum::<i128>(); 2],
+            frozen: [false; 2],
             floors: [0, 0],
             floor_updated_at: 0,
             withdrawn: [0, 0],
@@ -1200,6 +1238,31 @@ impl Fuzz {
     }
     fn payout_amount(&mut self) -> u64 {
         let pt = self.m.pools[0] + self.m.pools[1];
+        if self.step > 30 && self.rng.pct(3) {
+            // a sector bug or hostile sector: huge amounts, and amounts right at the claims ceiling
+            let room = (CLAIMS_CEILING as u128).saturating_sub(self.m.claims_total()) as u64;
+            return match self.rng.below(4) {
+                0 => u64::MAX - self.rng.below(50),
+                1 => {
+                    // fill the headroom, then immediately try to exit an unlocked bond
+                    let now = self.m.now;
+                    let unlocked: Vec<(usize, u64)> = self
+                        .m
+                        .bonds
+                        .iter()
+                        .filter(|(_, b)| now - b.created_at >= term_secs(b.term).1)
+                        .map(|(k, _)| *k)
+                        .collect();
+                    if !unlocked.is_empty() {
+                        let (p, idx) = unlocked[self.rng.idx(unlocked.len())];
+                        self.queue.push_back(Act::BondRequest { p, idx });
+                    }
+                    room
+                }
+                2 => room.saturating_add(1),
+                _ => CLAIMS_CEILING / 2,
+            };
+        }
         match self.rng.below(12) {
             0 => 0,
             1 => 1,
@@ -1211,13 +1274,7 @@ impl Fuzz {
             7 => self.rng.range(1_000_000, 1_000_000_000),
             8 => 123_456_789,
             9 => self.rng.range(1, 5_000),
-            10 => {
-                if self.rng.pct(8) {
-                    u64::MAX - self.rng.below(50)
-                } else {
-                    pt / 10 + 1
-                }
-            }
+            10 => pt / 10 + 1,
             _ => self.rng.range(1, pt.max(2)),
         }
     }
@@ -1370,7 +1427,7 @@ impl Fuzz {
         let settle_w = if cyc.active { 28 } else { 1 };
         let finalize_w = if cyc.active && cyc.processed == cyc.eligible { 14 } else { 1 };
         let warp_w = if !cyc.active && !gap_over && have_claims { 22 } else { 8 };
-        let table: [(u64, u8); 22] = [
+        let table: [(u64, u8); 23] = [
             (14, 0),                       // deposit_fee
             (12, 1),                       // request_payout
             (5, 2),                        // record_activity
@@ -1393,6 +1450,7 @@ impl Fuzz {
             (2, 19),                       // update
             (2, 20),                       // pause
             (2, 21),                       // reactivate
+            (3, 22),                       // pool freeze / thaw
         ];
         let total: u64 = table.iter().map(|x| x.0).sum();
         let mut r = self.rng.below(total);
@@ -1619,12 +1677,29 @@ impl Fuzz {
                 }
                 if self.rng.pct(35) {
                     // lowering the cap under an Active trader that already got paid: PayoutCapReached
-                    let paid: Vec<u64> = self.m.traders.iter().filter(|((ts, _, _), t)| *ts == s && t.status == St::Active && t.payout_count >= 1).map(|(_, t)| t.payout_count).collect();
-                    cfg.max_payout = if paid.is_empty() { 1 } else { *self.rng.pick(&paid) };
+                    let paid: Vec<((usize, usize, u64), u64)> =
+                        self.m.traders.iter().filter(|((ts, _, _), t)| *ts == s && t.status == St::Active && t.payout_count >= 1).map(|(k, t)| (*k, t.payout_count)).collect();
+                    if paid.is_empty() {
+                        cfg.max_payout = 1;
+                    } else {
+                        let ((ts, tp, tc), count) = *self.rng.pick(&paid);
+                        cfg.max_payout = count;
+                        // ... and immediately ask that trader for another payout (if the update succeeds)
+                        self.queue.push_back(Act::Payout { s: ts, p: tp, cid: tc, amount: 1_000, req: count + 1 });
+                    }
                 }
                 Act::Update { s, cfg }
             }
             20 => Act::Pause { s: self.pick_sector(true) },
+            22 => {
+                // freeze or thaw a payout pool; often both, so the both-frozen path is visited
+                let c = self.pick_coin();
+                let frozen = if self.m.frozen[c] { self.rng.pct(35) } else { self.rng.pct(75) };
+                if self.rng.pct(30) {
+                    self.queue.push_back(Act::PoolFreeze { c: 1 - c, frozen });
+                }
+                Act::PoolFreeze { c, frozen }
+            }
             _ => Act::Reactivate { s: self.pick_sector(true) },
         }
     }
@@ -2185,6 +2260,14 @@ impl Fuzz {
                 if old.cyc.avail < old.cyc.owed {
                     t.push("settle:ratio_below_1".into());
                 }
+                if old.frozen[0] && old.frozen[1] {
+                    t.push("settle:both_pools_frozen".into());
+                } else if (old.frozen[0] && old.pools[0] > 0) || (old.frozen[1] && old.pools[1] > 0) {
+                    t.push("settle:with_a_frozen_pool".into());
+                    if (0..2).any(|i| new.pools[i] < old.pools[i]) {
+                        t.push("settle:paid_from_the_other_pool_while_one_is_frozen".into());
+                    }
+                }
                 for (k, oc) in &old.claims {
                     match new.claims.get(k) {
                         None => t.push("settle:claim_closed".into()),
@@ -2220,6 +2303,9 @@ impl Fuzz {
                 }
                 if out == Out::Payout(PayoutOutcome::Paid) {
                     t.push("payout:queued".into());
+                    if new.claims_total() >= CLAIMS_CEILING as u128 {
+                        t.push("payout:filled_to_the_ceiling".into());
+                    }
                 }
             }
             Act::Record { .. } => t.push(format!("record:{:?}", out)),
@@ -2257,6 +2343,9 @@ impl Fuzz {
                 }
             }
             Act::Begin => {
+                if (0..2).any(|i| old.frozen[i] && old.pools[i] > 0) {
+                    t.push("begin:frozen_pool_left_out".into());
+                }
                 t.push(if old.claims.is_empty() { "begin:empty_cycle" } else { "begin:with_claims" }.into());
                 if old.cyc.started != 0 && old.now == old.cyc.started + GAP {
                     t.push("begin:exactly_at_gap".into());
@@ -2379,6 +2468,17 @@ impl Fuzz {
                 if self.env.svm.airdrop(addr, *lamports).is_ok() {
                     self.env.svm.expire_blockhash();
                 }
+            }
+            Act::PoolFreeze { c, frozen } => {
+                let pool = if *c == 0 { self.env.usdc_pool } else { self.env.usdt_pool };
+                // keep the account's lamports: the pool may have been dusted before init_vault and
+                // the rent invariant (14) tracks its exact balance
+                let acct = self.env.svm.get_account(&pool).unwrap();
+                let mut t = SplAccount::unpack(&acct.data).unwrap();
+                t.state = if *frozen { AccountState::Frozen } else { AccountState::Initialized };
+                let mut data = vec![0u8; SplAccount::LEN];
+                SplAccount::pack(t, &mut data).unwrap();
+                self.env.svm.set_account(pool, solana_account::Account { data, ..acct }).unwrap();
             }
             Act::SetTally { s, t } => {
                 let sec = &w.sectors[*s];
@@ -2895,6 +2995,11 @@ const REQUIRED_TAGS: &[&str] = &[
     "payout:stale_abandoned",
     "payout:graduated",
     "payout:queued",
+    "payout:filled_to_the_ceiling",
+    "begin:frozen_pool_left_out",
+    "settle:both_pools_frozen",
+    "settle:with_a_frozen_pool",
+    "settle:paid_from_the_other_pool_while_one_is_frozen",
     "record:Activity(Recorded)",
     "record:Activity(Throttled)",
     "record:Activity(Abandoned)",
@@ -2916,7 +3021,7 @@ const REQUIRED_TAGS: &[&str] = &[
 ];
 
 /// Every reachable error of every instruction must have been produced (and matched
-/// by the model) at least once. 0 = system "already in use", 3012 = Anchor
+/// by the model) at least once. 17 = spl-token AccountFrozen (a frozen pool), 0 = system "already in use", 3012 = Anchor
 /// AccountNotInitialized, 600x = VaultError (6000 + variant index).
 const REQUIRED_CODES: &[&str] = &[
     "register_product:6004", "register_product:6013", "register_product:6024", "register_product:0",
@@ -2925,6 +3030,8 @@ const REQUIRED_CODES: &[&str] = &[
     "deposit_reset:6001", "deposit_reset:6007", "deposit_reset:6011", "deposit_reset:6012", "deposit_reset:0",
     "record_activity:6005", "flag_trader_failed:6005", "mark_abandoned:6005", "mark_abandoned:6010",
     "request_payout:6001", "request_payout:6005", "request_payout:6008", "request_payout:6009", "request_payout:6015",
+    "request_payout:6043", "request_bond_payout:6043",
+    "deposit_fee:17", "deposit_reset:17", "deposit_bond:17", "admin_withdraw_marketing_funds:17",
     "begin_heartbeat:6025", "begin_heartbeat:6027",
     "settle_claims:6026", "settle_claims:6029", "settle_claims:6030", "settle_claims:6031", "settle_claims:6032",
     "settle_claims:6033", "settle_claims:6021",

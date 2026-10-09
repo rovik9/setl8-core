@@ -86,12 +86,21 @@ fn counters_track_every_claim_across_traders_and_requests() {
 
 #[test]
 fn the_total_cannot_overflow_u64() {
+    // SR-21: the total can no longer be driven anywhere near u64::MAX by a single sector
+    // request. REPLACED BEHAVIOUR (the one sanctioned test change of module 4b): this test
+    // used to ACCEPT `u64::MAX - 5`, which locked every bond exit and every other request
+    // with MathOverflow. It now pins that the $2.5M ceiling refuses that request and that
+    // the counter stops exactly at the ceiling. The property it is named for (the total can
+    // never wrap or overflow) is kept and is stronger now.
     let (mut e, s, w) = rig(5);
-    e.payout(&s, &w, 1, u64::MAX - 5, 1);
+    let ix = payout_ix(&e, &s, &w, 1, u64::MAX - 5, 1);
+    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::ClaimsCeilingExceeded));
+    let ceiling: u64 = 2_500_000_000_000; // OPEN_CLAIMS_CEILING, $2,500,000, pinned by value
+    e.payout(&s, &w, 1, ceiling - 5, 1);
     let ix = payout_ix(&e, &s, &w, 1, 6, 2);
-    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::MathOverflow));
-    e.payout(&s, &w, 1, 5, 2); // exactly u64::MAX in total is fine
-    assert_eq!(e.vault_state().open_claims_total, u64::MAX);
+    assert_rejected_cleanly(&mut e, &s, &w, ix, |r| assert_vault_err(r, VaultError::ClaimsCeilingExceeded));
+    e.payout(&s, &w, 1, 5, 2); // exactly the ceiling in total is fine
+    assert_eq!(e.vault_state().open_claims_total, ceiling);
 }
 
 #[test]
