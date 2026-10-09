@@ -1,12 +1,27 @@
 # Security review: core-vault
 
-Status: internal adversarial review, **not an external audit**. Written against commit `686bd71` plus the changes of this pass (see [Fixes in this pass](#fixes-in-this-pass)). Everything here was checked against the source; where a statement rests on a test, the test is named.
+Status: internal adversarial review, **not an external audit**. Written against commit `686bd71`; the pass's own changes are listed in [section 3](#fixes-in-this-pass). Everything here was checked against the source; where a statement rests on a test, the test is named. **Headline: one high-severity defect (SR-21) is open and waits for a founder decision; a tested patch is in `docs/proposed-fixes/`.**
 
 > The brief for this pass said "all 21 instructions". The program has **18** (`lib.rs`): 6 admin, 5 sector, 7 permissionless. All 18 are covered below.
 
 **Reading the tables.** `M` = writable, `S` = must sign. "Why enough" says what makes the check sufficient, not just what it is. Rounding: *floor* = rounds against the payer of the fee / in the vault's favour unless stated. Every `u128` product is of two `u64`-range values, so it cannot overflow `u128`.
 
-Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings)
+Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [Appendix: mutation tables](#appendix-mutation-tables)
+
+---
+
+## 0. Scope and method
+
+**In scope.** `programs/core-vault` (all 18 instructions, `utils/`, `state/`, `constants/`, `errors.rs`), the build gates in `scripts/`, the wire format as consumed from `setl8-shared-interfaces v0.4.0`, and the test infrastructure in `tests-rs/`. Reviewed commit: `686bd71` plus the changes listed in section 3.
+
+**Method** (each step catches things the others do not):
+
+1. **Manual line-by-line read** of every instruction: every account (mut / signer / owner / seeds / constraint and why it is enough), every argument and its validation, every arithmetic site (checked? rounding direction? overflow reachable?), state written, CPIs, and the worst a hostile caller can do. Result: section 1.
+2. **Seven independent read-only reviewers, one lens each**, followed by a sceptical second reviewer for every candidate finding (45 agent runs): accounts and authorisation; PDA lifecycle; arithmetic and time; token tricks; denial of service and griefing; state consistency and error handling; documentation truth and dead code. They had no write access. What survived the sceptics is in the findings (SR-xx) and in section 2.
+3. **A seeded, model-based random-sequence tester** (`tests-rs/tests/invariants_fuzz.rs`): the real program in LiteSVM against an independent model written from the README's rules, with 11 global invariants plus 4 consistency checks after every step. Normal run: 30 fixed seeds x 400 steps (about 17 s); long run: 20 seeds x 5,000 steps (100,000 steps, about 13 minutes) run once with no divergence. A wider, uncommitted search (361 extra seeds, 100 to 460, x 800 steps) is what found **SR-21** (seed 214).
+4. **Mutation testing of the tester itself**: program mutants that a correct tester must catch. See section 6.
+5. **Targeted tests**: `compute_budget.rs` (every instruction's compute units), `known_exposures.rs` (runnable reproductions of the needs-decision findings, SR-21 included), the PDA-seed unit tests, and for SR-21 a ready patch with its own regression tests (`docs/proposed-fixes/SR-21-claims-ceiling.patch`, not applied).
+6. The earlier suites (363 LiteSVM tests, 37 unit tests, 6 TypeScript tests) and the mutation passes of modules 3a to 3d.
 
 ---
 
@@ -374,3 +389,136 @@ No critical finding. One **high** defect in the program was found (SR-21, an ove
 **SR-14 / SR-15: keys.** There is no way to rotate an admin key: both are compiled in and are part of the vault's address. A lost key permanently disables admin actions; a stolen one cannot be revoked. The upgrade authority can replace the program, so it dominates every other guarantee. Decide the custody plan before mainnet (DEPLOY-CHECKLIST, section 3).
 
 **SR-18: where SL8's revenue lands.** `init_vault` sets the revenue destination to the SL8 admin key's own token accounts. Anyone who obtains that single key takes the revenue and, via SR-01, more. Consider a separate treasury key set at `init_vault` (a one-line change to the argument list that would alter the instruction's interface, hence a decision).
+
+## 6. The tester, and how it was tested
+
+**Invariants** (the number is printed in every failure message): 1 token conservation; 2 counters equal values recomputed from the accounts; 3 balances equal the model; 4 claims never grow, closed claims never reappear; 5 cycle state machine (processed <= eligible, ids +1, >= 432,000 s between starts); 6 caps; 7 a paused product never accepts `deposit_fee` / `deposit_reset` / `request_payout`; 8 registry totals; 9 a rejected call changes no account; 10 rent exemption; 11 a cycle never pays more than `min(available, owed)`; plus 12 chain equals model, 13 outcome / error equals the model's, 14 rent lamports reach the right account, 15 every account sits at its canonical address and is a known type. The checks that do not consult the model run first.
+
+**Does a green run mean anything?** The normal run asserts it reached 46 specific rejections (every reachable error of every instruction) and 28 interesting states (ratio below 1, a skipped claim, an exact-boundary clock, dust before creation, the global bond cap, a stored floor that binds, and so on). The generator is steered towards them; it is not hoped for.
+
+**Mutation testing.** Each mutant is a deliberate bug in the program, built into a scratch copy of the tree (the real tree stays byte-identical, checked after every run), loaded through `CORE_VAULT_SO`, and run against `fuzz_normal` alone. A survivor means the tester is too weak. **Result: 47 of 47 program mutants killed** (appendix A), and the real tree was byte-identical to a pristine copy after every run. The first invariant to trip was 13 (outcome or error code differs from the model) for 21 mutants, 12 (chain differs from the model) for 12, 2 (counters vs accounts) for 4, 3 (balances) for 4, 11 (cycle paid too much) for 2, and 5, 7, 8, 14 for one each. Invariant 4 also tripped (together with 13) on the mutant that makes claims grow. Invariants 1, 9 and 10 (token conservation, no change on a failed call, rent exemption) are guarantees of the SPL Token program and the Solana runtime that a bug in the vault cannot break, and 6 (caps) is always preceded by 13, so no program mutant reaches them first; they are covered by the corruption self-test instead. The same 47 plus the 35 mutants of `request_payout.rs` / `request_bond_payout.rs` (appendix B) were run against the final tree.
+
+`every_invariant_can_fire` corrupts the chain behind the model's back and checks that the matching invariant is the one that trips (invariants 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 14, 15). Invariants 6, 7 and 13 are reached through program mutants: any program bug that breaks a cap also breaks the model's expectation first, so 13 fires before 6.
+
+## 7. Known documented exceptions
+
+These are deliberate and documented in the README; they are listed so nobody mistakes them for new findings.
+
+1. **The admin withdrawal model.** Both admin keys together may take up to 75% of a pool's live balance per call, repeatedly, with no deduction for open claims or bond liabilities, at any time (mid-cycle, paused, repeatedly). The only guards are the two signatures, the fixed destination (SL8's token account for that mint) and the 25% reserve `max(stored floor, ceil(25% of live))`. This is the single exception to "no admin key on money". A mid-cycle withdrawal also makes the order of payments inside one cycle matter (SR-07).
+2. **The bond withdrawal fee stays in the pool.** The 0.2% fee on a bond withdrawal (rounded up) is not owed rather than transferred: no tokens move at request time, so it simply remains in the pool and is counted in `bond_withdrawal_fees_retained`. It benefits the claim holders who are still waiting, not SL8.
+3. **SL8's revenue lands in the SL8 admin key's own token accounts** (`sl8_wallet = SL8_ADMIN_PUBKEY`). This is an open pre-deploy decision (SR-18): a separate treasury key would be set at `init_vault`.
+4. **A product pause does not stop queued claims.** Pausing (manual or by reconciliation) blocks `deposit_fee`, `deposit_reset` and `request_payout` and freezes inactivity clocks; claims already queued, bond deposits and withdrawals, the heartbeat and the admin withdrawal all continue.
+5. **Wallet grinding raises the compute of `settle_claims`** (SR-13): a claimant can grind a wallet whose ATA derivation needs many bump tries. One claim always fits in a transaction; a batch of six may need the keeper to retry with smaller batches (measured: 112,797 CU typical, 242,481 CU with wallets ground to 7+ tries).
+6. **All claims have equal priority and share one ratio per cycle**; unpaid remainders carry over with no expiry, so a bond run dilutes trader payouts and the reverse.
+
+## 8. What is not covered
+
+* **No external audit.** This is an internal review by the development team's tooling; nobody independent has read the code.
+* **No formal verification.** The invariants are tested over fixed seeds (30 x 400 steps in the normal run, 20 x 5,000 once, plus 361 extra seeds x 800 steps), not proved.
+* **Jupiter / rebalancing is not built**, so no swap, rebalancing or oracle code was reviewed.
+* **The sector programs** (lev-trading and others), their payout logic and their payout-tally updates (SR-02, SR-17 depend on them), **the keeper software, the TypeScript client and any front end** are out of scope.
+* **`setl8-shared-interfaces`** was read as a pinned, read-only reference; it was not reviewed.
+* **Economic soundness**: pool sizing, bond economics (half of each principal goes to SL8 while the pool owes the whole principal back), solvency under stress and the 20% / 30% interest were not modelled; only their arithmetic was checked.
+* **Runtime and toolchain**: the Solana runtime, the SBF compiler and LiteSVM are assumed correct; behaviour on a real validator (clock drift, fee markets, compute pricing) is not tested. Dependencies (`anchor-lang` 0.32.1, `anchor-spl`) were used as released and not reviewed.
+* **Key custody and operations** (hardware wallets, the upgrade authority, the deploy procedure) are covered only as a checklist (DEPLOY-CHECKLIST.md).
+* **Token-2022** is rejected by design and was not exercised beyond the rejection paths.
+
+## Appendix: mutation tables
+
+### A. Program mutants run against the tester (`fuzz_normal` only) on the final tree: 47 of 47 killed
+
+| id | mutant (a deliberate bug in the program) | invariant(s) that caught it | first at seed/step |
+|---|---|---|---|
+| F01 | fee split rounds the pool share UP (off by one) | 3 | 34/11 |
+| F02 | open_claims_count not decremented when a claim closes | 2 | 5/23 |
+| F03 | bond cap room not freed (tracker not reduced on withdrawal) | 2 | 1/23 |
+| F04 | settle pays the USDC leg twice | 11, 13, 3 | 5/23 |
+| F05 | closed claim's rent goes to the USDC pool instead of the caller | 13, 14 | 5/23 |
+| F06 | pool order flipped (smaller pool drained first) | 3 | 34/39 |
+| F07 | reserve floor miscalculated (24.99% instead of 25%) | 12 | 8/18 |
+| F08 | paused product still accepts deposit_fee | 7 | 8/16 |
+| F09 | heartbeat gap off by one (> instead of >=) | 13 | 1/127 |
+| F10 | claims created in the running cycle are eligible (<= instead of <) | 13 | 3/54 |
+| F11 | bond matures one second late (> instead of >=) | 12 | 8/47 |
+| F12 | bond hard lock one second long (> instead of >=) | 13 | 5/103 |
+| F13 | inactivity limit inclusive (>= instead of >) | 13 | 3/114 |
+| F14 | registry total_requested_amount never incremented | 8 | 34/20 |
+| F15 | marketing reserve rounds the 25% DOWN | 13 | 13/61 |
+| F16 | cycle ratio always 1 (pays full, capped by the live pool) | 11, 13, 3 | 8/80 |
+| F17 | a claim already processed this cycle can be paid again in the same cycle | 13 | 13/55 |
+| F18 | frozen destination counted usable (transfer then reverts the batch) | 13, 3 | 13/144 |
+| F19 | bond withdrawal fee rounds down | 12 | 13/88 |
+| F20 | cycle available snapshot counts only the USDC pool | 12 | 1/8 |
+| F21 | global bond counter not updated by deposit_bond | 2 | 21/2 |
+| F22 | reconcile compares the count only | 12 | 13/135 |
+| F23 | mark_abandoned works on a live challenge | 13 | 13/23 |
+| F24 | activity throttle off by one (<= instead of <) | 13 | 2/29 |
+| F25 | claim.owed not reduced after a payment (pays again next cycle) | 13, 2 | 5/23 |
+| F26 | open_claims_total not reduced by a payment | 2 | 5/23 |
+| F27 | cycle_eligible_count off by one | 12 | 13/2 |
+| F28 | a reset does not burn reset_used | 12 | 13/45 |
+| F29 | Graduated one payout late (> instead of >=) | 12 | 8/44 |
+| F30 | bond deposit fee rounds down | 3 | 2/4 |
+| F31 | per-wallet bond cap exclusive (< instead of <=) | 13 | 21/2 |
+| F32 | global bond cap not enforced | 13 | 21/110 |
+| F33 | a nine-month bond gets the six-month interest | 12 | 21/2 |
+| F34 | sector authority not checked in deposit_fee | 13 | 34/87 |
+| F35 | admin withdrawal may take exactly one unit over the reserve | 13 | 13/8 |
+| F36 | request_payout accepted for a paused product | 13, 7 | 2/39 |
+| F37 | settle uses stale pool balances (no reload) inside a batch | 13, 3 | 5/61 |
+| F38 | bond fee not sent to SL8 (only the principal share) | 3 | 21/2 |
+| F39 | trader_state payout_count not bumped | 12 | 34/20 |
+| F40 | paused time not banked on resume | 12 | 21/82 |
+| F41 | settle ADDS the payment to claim.owed and open_claims_total (counters stay consistent, owed grows) | 13, 4 | 5/23 |
+| F42 | a paid claim is counted as processed twice | 12, 5 | 5/23 |
+| F43 | cycle id advances by 2 | 5 | 13/2 |
+| F44 | every settled claim is paid one base unit too much | 13, 3 | 34/39 |
+| F45 | request_payout stores a non-canonical bump in the claim | 13 | 5/21 |
+| F46 | closed claim's rent goes to the vault_state instead of the caller | 13, 14 | 5/23 |
+| F47 | the closed bond position's rent goes to the vault_state instead of the depositor | 14 | 1/23 |
+
+The four mutants of the proposed SR-21 fix (F48 check removed, F49 boundary, F50 constant 2^63, F51 ceiling ignores what is open) were run earlier against the patched tree and were all killed (invariant 13 each).
+
+### B. Program mutants run against the FULL LiteSVM suite on the final tree: 35 of 35 killed
+
+`request_payout.rs` (P) and `request_bond_payout.rs` (B), the two modules touched by the pass. B14 removes a guard that no instruction can reach by construction (`net > 0`); it is killed only because `a_position_worth_nothing_after_the_fee_is_refused` injects a corrupted position directly.
+
+| id | mutant | status | killed by (first failing tests) | failing |
+|---|---|---|---|---|
+| B01 | request_bond_payout: tracker not reduced | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_full_batch_fits_one_legacy_transaction_and_the_compute_budget, a_request_frees_the_cap_room_but_never_the_index | 9 |
+| B02 | request_bond_payout: global counter not reduced | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_request_frees_the_cap_room_but_never_the_index, counters_cannot_go_negative_or_overflow | 8 |
+| B03 | request_bond_payout: fee not counted as retained | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, boundaries_to_the_second_for_both_terms, counters_cannot_go_negative_or_overflow | 7 |
+| B04 | request_bond_payout: open_claims_count not bumped | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_claim_is_paid_from_both_pools_larger_first, a_depositor_without_an_ata_is_skipped_and_the_claim_is_kept | 16 |
+| B05 | request_bond_payout: open_claims_total not bumped | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_claim_is_paid_from_both_pools_larger_first, a_depositor_without_an_ata_is_skipped_and_the_claim_is_kept | 18 |
+| B06 | request_bond_payout: claim eligible in its creation cycle | killed | a_claim_made_during_an_open_cycle_waits_for_the_next, fuzz_normal | 2 |
+| B07 | request_bond_payout: claim id is not the deposit index | killed | fuzz_normal, seeded_bonds_requests_and_heartbeats_conserve_every_token_and_reconcile, several_bonds_of_one_wallet_each_settle_at_their_own_claim_address | 3 |
+| B08 | request_bond_payout: claim kind is trader | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_claim_is_paid_from_both_pools_larger_first, a_claim_made_during_an_open_cycle_waits_for_the_next | 15 |
+| B09 | request_bond_payout: position not closed (double withdrawal) | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_can_be_withdrawn_only_once, a_request_frees_the_cap_room_but_never_the_index | 8 |
+| B10 | request_bond_payout: tracker not written back | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_request_frees_the_cap_room_but_never_the_index, fuzz_normal | 7 |
+| B11 | request_bond_payout: position depositor not checked | killed | each_position_field_is_checked_on_its_own | 1 |
+| B12 | request_bond_payout: claim pays the default wallet | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_claim_is_paid_from_both_pools_larger_first, a_claim_made_during_an_open_cycle_waits_for_the_next | 16 |
+| B13 | request_bond_payout: claim owes the gross amount | killed | a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_bond_claim_is_paid_from_both_pools_larger_first, a_depositor_without_an_ata_is_skipped_and_the_claim_is_kept | 19 |
+| B14 | request_bond_payout: zero-net guard removed (UNREACHABLE by construction: expected to survive) | killed | a_position_worth_nothing_after_the_fee_is_refused | 1 |
+| B15 | request_bond_payout: position index not matched | killed | each_position_field_is_checked_on_its_own | 1 |
+| P01 | request_payout: no active-product check | killed | after_an_auto_pause_fees_resets_and_payouts_are_refused, every_rejected_request_leaves_counters_and_claims_unchanged, fuzz_normal | 6 |
+| P02 | request_payout: zero amount accepted | killed | a_zero_amount_request_is_rejected_and_never_counted, every_rejected_request_leaves_counters_and_claims_unchanged, fuzz_normal | 6 |
+| P03 | request_payout: status not checked | killed | failed_and_abandoned_records_are_invalid_status, fuzz_normal, graduates_exactly_at_max_payout_count | 5 |
+| P04 | request_payout: stale path never taken | killed | fuzz_normal, stale_challenge_is_abandoned_with_ok_return_data_and_pays_nothing, stale_path_abandons_ok_creates_no_claim_and_moves_no_tokens | 7 |
+| P05 | request_payout: cap check off by one | killed | fuzz_normal, payout_cap_reached_after_the_cap_is_lowered_below_the_count, payout_cap_reached_rejects_without_queuing_anything | 3 |
+| P06 | request_payout: request id not checked | killed | chained_resets_are_unlimited_and_carry_state_even_prices, chained_resets_are_unlimited_and_carry_state_floored_prices, each_request_gets_its_own_claim_and_ids_never_repeat | 10 |
+| P09 | request_payout: activity clock not touched | killed | a_payout_resets_the_idle_clock, fuzz_normal, paid_path_books_the_payout_and_refreshes_activity | 4 |
+| P10 | request_payout: payout_count not bumped | killed | a_dusted_tally_address_counts_as_missing, a_longer_tally_with_matching_numbers_is_fine, a_matching_tally_changes_nothing | 46 |
+| P11 | request_payout: total_requests_emitted not bumped | killed | a_dusted_tally_address_counts_as_missing, a_longer_tally_with_matching_numbers_is_fine, a_matching_tally_changes_nothing | 32 |
+| P12 | request_payout: total_requested_amount not bumped | killed | a_dusted_tally_address_counts_as_missing, a_longer_tally_with_matching_numbers_is_fine, a_matching_tally_changes_nothing | 26 |
+| P13 | request_payout: graduation one late | killed | fuzz_normal, graduated_cannot_be_flagged, graduated_record_is_invalid_status | 8 |
+| P14 | request_payout: open_claims_count not stored | killed | a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone, a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_claim_created_during_the_cycle_is_not_eligible_until_the_next | 62 |
+| P15 | request_payout: open_claims_total not stored | killed | a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone, a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_claim_cannot_be_settled_twice_in_one_cycle | 68 |
+| P16 | request_payout: claim owes one more than requested | killed | a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone, a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_claim_cannot_be_settled_twice_in_one_cycle | 62 |
+| P17 | request_payout: claim eligible in the cycle it was created | killed | a_claim_created_during_the_cycle_is_not_eligible_until_the_next, a_claim_made_during_an_active_cycle_records_that_cycle_id, every_invariant_can_fire | 4 |
+| P18 | request_payout: claim kind is bond | killed | a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone, a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_claim_cannot_be_settled_twice_in_one_cycle | 55 |
+| P19 | request_payout: claim pays the default wallet | killed | a_batch_of_one_ground_wallet_is_cheap_enough_to_settle_alone, a_bond_and_a_trader_payout_share_one_cycle_end_to_end, a_claim_cannot_be_settled_twice_in_one_cycle | 58 |
+| P20 | request_payout: stale path does not persist Abandoned | killed | fuzz_normal, stale_challenge_is_abandoned_with_ok_return_data_and_pays_nothing, stale_path_abandons_ok_creates_no_claim_and_moves_no_tokens | 4 |
+| P21 | request_payout: sector authority not checked | killed | another_sectors_authority_is_unauthorized, every_rejected_request_leaves_counters_and_claims_unchanged, fuzz_normal | 4 |
+| P22 | request_payout: reports Abandoned for an accepted request | killed | a_dusted_claim_address_still_works, a_payout_resets_the_idle_clock, a_request_creates_a_claim_with_every_field_exact | 11 |
+
+The four SR-21 mutants (P07, P08, B16, B17) were killed against the patched tree.
