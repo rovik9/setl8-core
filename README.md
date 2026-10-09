@@ -74,6 +74,7 @@ tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tools/admin/          setl8-admin: the admin signing tool (own Cargo workspace; see docs/ADMIN-TOOL.md)
 tools/devnet-sector/   mock sector program: TEST SCAFFOLDING for the devnet rehearsal (own workspace; insecure by design)
 tools/devnet-rehearsal/ driver that runs the whole protocol on a real cluster (own workspace; see docs/DEVNET-REHEARSAL.md)
+tools/keeper/         setl8-keeper: the permissionless payout-cycle runner (own workspace; see docs/KEEPER.md)
 tests/                Anchor TypeScript tests + admin test keypairs
 scripts/              build, test and deploy-gate scripts (see below)
 vault-repo-spec.md    original spec for this repo
@@ -190,6 +191,7 @@ Every withdrawal logs the pool, the amount, the withdrawable amount and the rese
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md): assets, actors, trust assumptions, attack trees, and what each compromise can do.
 - [`docs/DEPLOY-CHECKLIST.md`](docs/DEPLOY-CHECKLIST.md): devnet then mainnet, upgrade-authority handling, keeper duties, monitoring, incident steps.
 - [`docs/ADMIN-TOOL.md`](docs/ADMIN-TOOL.md): the admin signing ceremony (`tools/admin`).
+- [`docs/KEEPER.md`](docs/KEEPER.md): the keeper (`tools/keeper`), an off-chain runner that reconciles, begins, settles and finalizes the heartbeat cycle. It calls only permissionless instructions, holds no authority, refuses an admin key as its fee payer, and any number of keepers may run at once. How to run it, its alerts, its cost, its risks.
 - [`docs/DEVNET-REHEARSAL.md`](docs/DEVNET-REHEARSAL.md): the devnet rehearsal (`tools/devnet-rehearsal`, `tools/devnet-sector`, `scripts/devnet-rehearsal.sh`): how to repeat it, what a real validator showed (95/95 checks on a local validator; the devnet run itself is pending a funded faucet), and what differs from LiteSVM.
 
 ## Design notes

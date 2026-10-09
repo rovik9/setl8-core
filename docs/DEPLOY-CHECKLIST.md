@@ -85,7 +85,16 @@ A transaction signed against a durable nonce stays valid until the nonce is adva
 
 ## 6. Keeper duties
 
-Anyone can run these; run at least two independent keepers. All instructions are permissionless.
+The keeper is **`setl8-keeper`** ([KEEPER.md](KEEPER.md)): it does the steps below by itself, calls only permissionless instructions and holds no authority. To bring it up:
+
+1. `scripts/verify-keeper-build.sh` on the keeper host (it must end with `OK: the keeper embeds the real admin keys and was built for them.`; record the `sha256`).
+2. **A fresh keeper key, never an admin key** (the keeper refuses an admin key): `solana-keygen new -o keeper.json`, `chmod 600 keeper.json`, fund it with about **0.5 SOL** (a cycle costs about 0.0005 SOL in fees for 600 claims, and closing claims refunds their rent to the keeper).
+3. `setl8-keeper status --cluster <c> --fee-payer-pubkey <pubkey>` and `setl8-keeper dry-run --cluster <c> --fee-payer-pubkey <pubkey>`: read what it sees and what it would send. Nothing is sent.
+4. `setl8-keeper once --cluster <c> --keypair keeper.json --log-file keeper.log` (on mainnet add `--i-understand-this-is-mainnet`): one real pass. Exit 0 = fine, 10 = an alert is present (read the log), 20 = a hard failure.
+5. Schedule it (systemd `run` or cron `once`, examples in KEEPER.md) and set `SETL8_KEEPER_WEBHOOK` for alerts. **Run a second keeper on another host and RPC provider with another key.**
+6. Verify the first real cycle with `status` before and after: cycle closed, `processed == eligible`, open claims as expected, no alert.
+
+The duties it automates, for a manual fallback (anyone can run these; run at least two independent keepers. All instructions are permissionless.
 
 | when | do | notes |
 |---|---|---|

@@ -6,7 +6,7 @@ Status: internal adversarial review, **not an external audit**. Written against 
 
 **Reading the tables.** `M` = writable, `S` = must sign. "Why enough" says what makes the check sufficient, not just what it is. Rounding: *floor* = rounds against the payer of the fee / in the vault's favour unless stated. Every `u128` product is of two `u64`-range values, so it cannot overflow `u128`.
 
-Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [9. The admin signing tool](#9-the-admin-signing-tool) · [10. The devnet rehearsal](#10-the-devnet-rehearsal) · [Appendix: mutation tables](#appendix-mutation-tables)
+Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [9. The admin signing tool](#9-the-admin-signing-tool) · [10. The devnet rehearsal](#10-the-devnet-rehearsal) · [11. The keeper](#11-the-keeper) · [Appendix: mutation tables](#appendix-mutation-tables)
 
 ---
 
@@ -484,6 +484,31 @@ Module 6 ran the whole protocol, every admin step through `setl8-admin`, with a 
 
 Documentation corrections (they make the section 4 table more accurate, not the program different): on a real validator one token transfer costs 105 CU against 6,147 in LiteSVM, so the table's figures for token-moving instructions are **upper bounds** (about 6k too high per token CPI); pause / reactivate cost 8.4k with a full 32-tier registry (identical in LiteSVM) against the 4.7k shown for a small one; the admin tool's genesis memo adds 24,928 CU. No instruction needs a ComputeBudget instruction.
 
+## 11. The keeper
+
+`tools/keeper` (`setl8-keeper`, module 7; guide in [KEEPER.md](KEEPER.md)) is the off-chain runner of the payout cycle. It is **not part of the program** (the `.so` hashes are unchanged) and **changes the status of no finding**; it is the operational answer to SR-06 (hard errors when another keeper wins a race), SR-08 (empty cycles) and the liveness half of SR-03 and SR-21.
+
+**What it can do:** send four permissionless instructions (`reconcile_product`, `begin_heartbeat`, `settle_claims`, `finalize_heartbeat`) from a fee-payer key. That is all it builds: a test decodes every transaction of a full cycle and checks the program, the discriminator, the single signer and that no admin key appears.
+
+**What it cannot do wrong:**
+
+* *Move money anywhere it should not.* It names no amount and no destination: the program pays each claim its pro-rata share to the claimant's own associated token accounts, and refuses a wrong account (a hard error that reverts only the keeper's transaction).
+* *Pay a claim twice.* The program refuses a second settlement of a claim in a cycle. A keeper that loses a race gets `ClaimAlreadySettled`, `ClaimNotEligible`, `CycleInProgress`, `NoCycleInProgress`, `HeartbeatTooEarly` or (when the winner paid the claim in full and closed it) `InvalidClaim`, logs `lost_race` and re-reads. Two, three keepers with different keys were run at the same instant on a real validator: one cycle, all claims paid once, no error.
+* *Waste a cycle slot.* It begins a cycle only when claims are open and the 432,000 s gap (read from `core_vault`, on the chain's clock) has passed.
+* *Hold power.* It refuses to start with the SL8 or ROV admin key (all four public keys this repository has embedded), with a key file readable by others, on mainnet without `--i-understand-this-is-mainnet`, and against a node whose genesis hash is not the named cluster's. The fee-payer key is hot and holds only fee money.
+* *Leak.* No key material, no webhook URL and no custom cluster URL (host only) in any log, error, panic message or webhook body (tested).
+
+**What can go wrong, honestly:**
+
+* **Liveness.** No keeper running means no payouts, an open cycle that stays open, and (with a full claims queue) bond exits refused at the ceiling. Run two independent keepers.
+* **A hostile RPC node** can make a keeper idle or send transactions the program rejects; it cannot make the program pay what it does not owe. The genesis check catches a wrong network, not a lying node.
+* **`--claims-file`** (for providers without `getProgramAccounts`) can omit claims; the cycle then cannot finalize and the keeper reports `cycle_stuck`. It cannot cause a wrong payment because every claim is re-read from the chain before it is sent.
+* **The skipped-claim alert** is stateless: it judges from the claim's cycle numbers and the accounts as they are now, an approximation of "skipped three cycles in a row".
+* The keeper's own tests found three defects before release, all fixed and tested: a benign race logged as errors; a pass that could not send `begin_heartbeat` reporting success; a custom cluster URL (which can carry an API key) echoed into logs. A related label in `tools/admin` (`Cluster::name()` for a URL cluster, written into the transaction file's `cluster` field) still echoes a custom URL; the admin tool was deliberately left unchanged and the field is advisory metadata, but do not put an API-key URL in `--cluster` there (use `--rpc`).
+* Tested in LiteSVM (200 tests, with signature verification on) and end to end on a **local** validator; not yet on devnet or mainnet.
+
+Mutation testing of the keeper's decision logic and safety checks: appendix E.
+
 ## Appendix: mutation tables
 
 ### A. Program mutants run against the tester (`fuzz_normal` only) on the final tree: 47 of 47 killed
@@ -675,3 +700,47 @@ Each mutant is one deliberate bug in `tools/admin/src`, built in a scratch copy 
 | T49 | status reports the whole balance as withdrawable | killed | status_reports_the_exact_numbers | 1 |
 | T50 | status headroom ignores the open claims | killed | status_reports_the_exact_numbers, status_shows_a_frozen_pool_and_a_pool_at_the_claims_ceiling | 2 |
 | T51 | amount parser accepts a seventh decimal | killed | bad_key_files_are_rejected_without_echoing_their_contents, every_command_has_help_and_the_error_paths_are_clean, fmt::tests::bad_amounts_are_refused | 3 |
+
+### E. Mutants of the keeper's decision logic and safety checks, run against the keeper's full suite: 37 of 37 killed
+
+Each mutant is one deliberate bug in `tools/keeper/src`, built in a scratch copy (the real tree, `tools/admin` and `programs/` were byte-identical to a pristine copy after every run). K31 (`begin_heartbeat` that cannot be sent still looks healthy) first SURVIVED: the existing test failed on the reconcile before it ever reached begin. A real test was added (`races::a_begin_that_cannot_be_sent_after_a_good_reconcile_ends_the_pass_with_a_hard_failure_naming_begin`) and the mutant was then killed.
+
+| id | mutant | status | killed by (first failing tests) | failing |
+|---|---|---|---|---|
+| K01 | begins a cycle one second early | killed | a_skipped_claim_is_paid_in_the_next_cycle_once_its_account_exists_again_and_not_before, plan::tests::the_gap_boundary_to_the_second, plan::tests::the_schedule_table | 5 |
+| K02 | begins a cycle with no open claims | killed | a_payer_holding_exactly_the_threshold_raises_no_alert, an_empty_queue_after_a_finished_cycle_stays_idle_even_long_after_the_gap, an_empty_queue_sends_nothing_and_leaves_the_cycle_counter_alone | 9 |
+| K03 | begin without the reconcile pass | killed | a_begin_that_landed_but_is_reported_unconfirmed_is_not_repeated_and_the_cycle_goes_on, a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, a_claim_skipped_by_the_program_counts_as_processed_and_is_not_settled_again_by_the_next_pass | 80 |
+| K04 | reconcile skipped for the last product | killed | a_begin_that_landed_but_is_reported_unconfirmed_is_not_repeated_and_the_cycle_goes_on, a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, a_claim_skipped_by_the_program_counts_as_processed_and_is_not_settled_again_by_the_next_pass | 79 |
+| K05 | batch of 7 claims | killed | a_claims_file_with_comments_and_blank_lines_completes_the_cycle, a_fee_cap_of_three_transactions_stops_the_cycle_after_the_first_settle_batch, a_fee_cap_that_fits_the_whole_cycle_lets_it_finish | 40 |
+| K06 | wrong ATA in the triple (USDT slot uses the USDC mint) | killed | a_begin_that_landed_but_is_reported_unconfirmed_is_not_repeated_and_the_cycle_goes_on, a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, a_claim_refused_in_one_pass_is_tried_again_by_the_next_pass_because_nothing_is_remembered | 94 |
+| K07 | settles a claim created in this very cycle (not eligible) | killed | a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, plan::tests::eligibility_is_created_before_and_not_processed_this_cycle | 2 |
+| K08 | re-settles a claim already processed this cycle | killed | claims_part_paid_by_the_other_keeper_before_the_keeper_re_reads_them_are_skipped_without_sending_or_losing_a_race, plan::tests::eligibility_is_created_before_and_not_processed_this_cycle | 2 |
+| K09 | finalizes before processed == eligible | killed | a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, a_claim_refused_in_one_pass_is_tried_again_by_the_next_pass_because_nothing_is_remembered, a_claim_with_usable_atas_and_the_same_cycle_numbers_does_not_alert_during_a_pass | 22 |
+| K10 | a lost race (ClaimAlreadySettled) is treated as a failure | killed | a_settle_that_the_node_accepted_but_that_failed_on_chain_with_claim_already_settled_is_the_same_benign_race, errors::tests::names_and_classes, losing_a_settle_race_is_logged_as_claim_already_settled_and_the_cycle_still_finishes_with_exact_payments | 4 |
+| K11 | a frozen pool is not detected | killed | a_custom_cluster_url_with_an_api_key_must_not_appear_in_the_output, a_failing_webhook_and_a_refused_start_leak_nothing_either, a_failing_webhook_does_not_stop_the_cycle_and_is_logged_without_the_url | 20 |
+| K12 | a frozen pool counts as spendable in the coverage check | killed | a_frozen_pool_does_not_count_towards_coverage, a_frozen_usdc_pool_before_begin_is_never_touched_and_usdt_pays_pro_rata, a_pool_frozen_mid_cycle_caps_payments_at_the_remaining_usdt_in_the_order_the_keeper_settles | 5 |
+| K13 | ceiling alert at >= 80% instead of > 80% (off by one) | killed | alerts::tests::the_ceiling_alert_is_strictly_above_80_percent, exactly_80_percent_of_the_ceiling_raises_no_ceiling_alert, the_read_only_status_report_covers_the_same_three_ceiling_boundaries_and_sends_nothing | 3 |
+| K14 | no alert for a product auto-paused by reconcile | killed | a_mismatching_tally_pauses_its_product_with_reason_two_before_begin_and_the_cycle_still_runs, a_wrong_tally_pauses_the_product_with_reason_2_and_the_queued_claims_still_settle_in_the_same_pass, alerts::tests::auto_paused_products_only_for_the_reconciliation_reason | 4 |
+| K15 | cycle-open alert at >= 24 h | killed | a_cycle_open_for_exactly_24_hours_is_not_an_alert_and_the_keeper_finishes_it, alerts::tests::cycle_open_boundary_is_strictly_more_than_24_hours | 2 |
+| K16 | no-cycle alert at >= 6 days | killed | alerts::tests::no_cycle_boundary_is_strictly_more_than_6_days_with_claims_open, six_days_without_a_cycle_is_not_yet_an_alert_and_the_keeper_begins | 2 |
+| K17 | payer-balance alert at <= threshold | killed | a_custom_threshold_from_the_config_is_honoured_to_the_lamport, a_payer_holding_exactly_the_threshold_raises_no_alert, alerts::tests::payer_balance_boundary | 3 |
+| K18 | SL8 admin key not refused as the keeper key | killed | a_failing_webhook_and_a_refused_start_leak_nothing_either, a_refused_key_never_creates_the_lock_file, dry_run_and_status_refuse_every_admin_pubkey_given_as_the_fee_payer | 6 |
+| K19 | ROV admin key not refused as the keeper key | killed | dry_run_and_status_refuse_every_admin_pubkey_given_as_the_fee_payer, refuses_to_start_with_the_rov_test_admin_key_as_the_fee_payer, safety::tests::every_admin_key_is_refused | 4 |
+| K20 | key-permission check removed (loose files accepted) | killed | key_files_readable_by_group_or_others_are_refused_with_a_chmod_hint, the_real_binary_refuses_loose_key_files_garbage_and_mainnet_without_the_flag | 2 |
+| K21 | genesis check removed | killed | a_custom_url_cluster_is_refused_on_a_public_genesis_and_accepted_on_a_private_one, a_devnet_keeper_on_a_localnet_genesis_is_refused_too, a_genesis_hash_that_changes_between_passes_stops_the_next_pass_before_anything_is_sent | 12 |
+| K22 | mainnet gate removed | killed | mainnet_without_the_flag_is_refused_before_the_key_is_read_or_any_chain_call, safety::tests::mainnet_needs_the_flag, the_real_binary_refuses_loose_key_files_garbage_and_mainnet_without_the_flag | 3 |
+| K23 | the webhook URL is logged | killed | a_failing_webhook_and_a_refused_start_leak_nothing_either, a_failing_webhook_does_not_stop_the_cycle_and_is_logged_without_the_url, a_full_cycle_leaks_neither_the_key_nor_the_webhook_url_given_on_the_command_line | 5 |
+| K24 | key material is logged at start | killed | a_failing_webhook_and_a_refused_start_leak_nothing_either, a_full_cycle_leaks_neither_the_key_nor_the_webhook_url_given_on_the_command_line, a_full_cycle_leaks_neither_the_key_nor_the_webhook_url_given_through_the_environment | 3 |
+| K25 | max-sends-per-run ignored | killed | a_claim_queued_while_the_cycle_is_open_is_left_alone_does_not_hold_the_cycle_back_and_is_paid_by_the_next_one, a_claim_with_usable_atas_and_the_same_cycle_numbers_does_not_alert_during_a_pass, a_cycle_open_for_24_hours_and_one_second_raises_cycle_open_too_long_while_the_keeper_continues_it | 18 |
+| K26 | max-fee-lamports-per-run ignored | killed | a_fee_cap_of_one_transaction_allows_exactly_one_send_then_stops_with_a_hard_failure, a_fee_cap_of_three_transactions_stops_the_cycle_after_the_first_settle_batch, a_priority_fee_counts_against_the_fee_cap_so_a_huge_price_stops_the_very_first_send | 5 |
+| K27 | dry-run actually sends | killed | dry_run_silently_drops_the_batches_when_claims_cannot_be_listed, dry_run_with_a_cycle_already_open_lists_the_remaining_batches_and_the_finalize, dry_run_with_a_funded_key_sends_and_simulates_nothing_and_names_the_calls_in_order | 5 |
+| K28 | paused products are reconciled too | killed | a_paused_product_is_not_reconciled_and_the_skip_is_logged, a_product_paused_by_the_admins_is_not_reconciled_not_alerted_as_auto_paused_and_claims_still_settle, plan::tests::only_active_products_are_reconciled | 3 |
+| K29 | a failing batch is never split to isolate one bad claim | killed | a_claim_refused_in_one_pass_is_tried_again_by_the_next_pass_because_nothing_is_remembered, one_poisoned_claim_is_isolated_by_splitting_the_batch_and_every_good_claim_is_still_paid_exactly | 2 |
+| K30 | a rival that paid a claim in full is not recognised | killed | a_settle_race_lost_to_a_keeper_that_paid_the_claims_in_full_is_logged_as_a_benign_race_not_as_errors | 1 |
+| K31 | begin_heartbeat that cannot be sent still looks healthy | killed | a_begin_that_cannot_be_sent_after_a_good_reconcile_ends_the_pass_with_a_hard_failure_naming_begin | 1 |
+| K32 | the claims source is not checked before anything is sent | killed | a_garbage_line_in_the_claims_file_fails_and_echoes_at_most_its_first_50_characters, without_getprogramaccounts_the_cycle_fails_loudly_and_names_the_claims_file | 2 |
+| K33 | a custom cluster URL is logged in full | killed | a_custom_cluster_url_with_an_api_key_must_not_appear_in_the_output, safety::tests::custom_clusters_are_labelled_by_host_only | 2 |
+| K34 | an unreadable node at start-up is reported as a refusal (2) not a hard failure (20) | killed | a_node_that_cannot_be_reached_at_start_up_exits_20_with_the_genesis_read_error_and_sends_nothing | 1 |
+| K35 | coverage ratio rounds instead of flooring | killed | alerts::tests::the_ratio_is_floored_not_rounded, status_report_has_exact_values_and_sends_nothing | 2 |
+| K36 | batches are not in a stable (address) order | killed | batches_follow_ascending_claim_address_order_whatever_order_the_node_lists_the_claims_in, plan::tests::batches_are_at_most_six_in_a_stable_order | 2 |
+| K37 | the stalled-cycle guard is disabled | killed | a_cycle_that_makes_no_progress_for_three_rounds_stops_the_pass_with_a_clear_failure_and_a_later_pass_finishes_it | 1 |
