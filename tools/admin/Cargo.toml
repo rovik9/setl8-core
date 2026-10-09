@@ -1,0 +1,52 @@
+[package]
+name = "setl8-admin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline-first signing tool for the core-vault 2-of-2 admin instructions (plan / inspect / sign / send)."
+
+[lib]
+name = "setl8_admin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "setl8-admin"
+path = "src/main.rs"
+
+# Standalone workspace with its own Cargo.lock: the program's lockfile and
+# tests-rs's lockfile never change because of this tool.
+[workspace]
+
+[features]
+# Same meaning as in core-vault: embed the PUBLIC TEST admin keys. The default
+# build embeds the REAL admin pubkeys and is the one to ship.
+localnet = ["core-vault/localnet"]
+
+[dependencies]
+core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint"] }
+# v0.4.1 has the correct admin_withdraw_marketing_funds builder. core-vault itself
+# stays on v0.4.0 (the program is frozen); the two are different packages to cargo.
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+anchor-lang = "=0.32.1"
+anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }
+solana-keypair = "=2.2.3"
+solana-signer = "=2.2.1"
+solana-signature = "=2.3.0"
+solana-message = "=2.4.0"
+solana-hash = "=2.3.0"
+sha2 = "=0.10.9"
+bs58 = "=0.5.1"
+base64 = "=0.22.1"
+bincode = "=1.3.3"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+zeroize = "=1.9.0"
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+# the version the existing tests-rs suite builds the four unchanged admin instructions with
+si040 = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.0" }
+litesvm = "=0.7.0"
+solana-account = "=2.2.1"
+solana-transaction = "=2.2.3"
+solana-transaction-error = "=2.2.1"
