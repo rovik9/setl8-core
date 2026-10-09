@@ -30,7 +30,7 @@ A transaction is signable only if its instructions are exactly
    nonce is used)
 ```
 
-and the message is **byte-for-byte** the canonical message the tool itself builds for the decoded contents. Any other program, any extra instruction, a transfer, an unknown or non-admin vault instruction, an account that is not the re-derived PDA or associated token account, a missing signer flag, a different fee payer than the one you declared: `inspect` flags it and `sign` refuses before it asks for anything. The memo is `setl8-admin/1 genesis=<hash>`: it puts the cluster's genesis hash **inside the signed bytes**, so a devnet transaction can never be mistaken for a mainnet one.
+and the message is **byte-for-byte** the canonical message the tool itself builds for the decoded contents. Any other program, any extra instruction, a transfer, an unknown or non-admin vault instruction, an account that is not the re-derived PDA or associated token account, a missing signer flag, a different fee payer than the one you declared: `inspect` flags it and `sign` refuses before it asks for anything. The memo is `setl8-admin/1 genesis=<hash>`: it puts the cluster's genesis hash **inside the signed bytes**, so a devnet transaction can never be mistaken for a mainnet one. The memo program costs about 25,000 compute units (measured identically in LiteSVM and on a real validator), so an admin transaction through the tool costs 29-49k CU in all: well inside the default limit, no ComputeBudget instruction is needed.
 
 ## 2. Build and verify the binary
 

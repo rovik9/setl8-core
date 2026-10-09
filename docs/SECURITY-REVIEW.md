@@ -6,7 +6,7 @@ Status: internal adversarial review, **not an external audit**. Written against 
 
 **Reading the tables.** `M` = writable, `S` = must sign. "Why enough" says what makes the check sufficient, not just what it is. Rounding: *floor* = rounds against the payer of the fee / in the vault's favour unless stated. Every `u128` product is of two `u64`-range values, so it cannot overflow `u128`.
 
-Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [9. The admin signing tool](#9-the-admin-signing-tool) · [Appendix: mutation tables](#appendix-mutation-tables)
+Contents: [1. Per-instruction review](#1-per-instruction-review) · [2. The 13 hunted classes](#2-the-13-hunted-classes) · [3. Fixes in this pass](#fixes-in-this-pass) · [4. Compute and stack](#4-compute-and-stack) · [5. Findings](#5-findings) · [6. The tester and its mutation testing](#6-the-tester-and-how-it-was-tested) · [7. Known documented exceptions](#7-known-documented-exceptions) · [8. What is not covered](#8-what-is-not-covered) · [9. The admin signing tool](#9-the-admin-signing-tool) · [10. The devnet rehearsal](#10-the-devnet-rehearsal) · [Appendix: mutation tables](#appendix-mutation-tables)
 
 ---
 
@@ -333,7 +333,7 @@ What the security pass changed:
 
 ## 4. Compute and stack
 
-Measured by `tests-rs/tests/compute_budget.rs` on the real program (re-measured after module 4b for the four instructions it changed; the others are unchanged), one transaction per row (rows that derive a PDA from a freshly generated key vary by about 1,500 CU per extra bump tried between runs); each row asserts a ceiling (200,000 CU, the default per-instruction limit; 400,000 for a full settle batch).
+**Section 10 note:** a real validator measures lower for every instruction that moves tokens (a token transfer is 105 CU there against 6,147 in LiteSVM) and `pause_product` / `reactivate_product` at 8.4k with a 32-tier registry; read this table as an upper bound for token-moving instructions. Measured by `tests-rs/tests/compute_budget.rs` on the real program (re-measured after module 4b for the four instructions it changed; the others are unchanged), one transaction per row (rows that derive a PDA from a freshly generated key vary by about 1,500 CU per extra bump tried between runs); each row asserts a ceiling (200,000 CU, the default per-instruction limit; 400,000 for a full settle batch).
 
 | instruction | measured case | CU | bump searches (`find_program_address`) |
 |---|---|---:|---|
@@ -475,6 +475,14 @@ These are deliberate and documented in the README; they are listed so nobody mis
 * The **honesty of an RPC node** for `status`, the pre-flight and `inspect --rpc` (the program re-checks everything at execution).
 * The tool itself being **swapped for a malicious build**: build it on each machine, run `scripts/verify-admin-tool-build.sh`, record and compare the hash (reproducibility is only as good as the toolchain).
 * It was tested against LiteSVM with the real program, **not on a live cluster**.
+
+## 10. The devnet rehearsal
+
+Module 6 ran the whole protocol, every admin step through `setl8-admin`, with a mock sector program ([DEVNET-REHEARSAL.md](DEVNET-REHEARSAL.md)). **The run on devnet itself is pending: the public faucet refused every request, so the throwaway keys could not be funded.** The same driver was run against a **local `solana-test-validator`** (a real runtime: real fees, compute metering, token / associated-token / memo programs, durable nonces): 95 of 95 checks passed.
+
+**No new finding, and no existing finding's status changes.** On the real runtime the program and the tool behaved as in LiteSVM: the frozen-pool settlement inside an open cycle does not revert and pays from the other pool only; a wrong sector tally auto-pauses the product and the call still returns Ok; the claims-ceiling, request-id, bond-lock and heartbeat-gap refusals carry the documented error codes; the exact-boundary withdrawal leaves exactly the reserve and one base unit more is refused by both the tool and the program; a nonce-revoked transaction is rejected by the cluster.
+
+Documentation corrections (they make the section 4 table more accurate, not the program different): on a real validator one token transfer costs 105 CU against 6,147 in LiteSVM, so the table's figures for token-moving instructions are **upper bounds** (about 6k too high per token CPI); pause / reactivate cost 8.4k with a full 32-tier registry (identical in LiteSVM) against the 4.7k shown for a small one; the admin tool's genesis memo adds 24,928 CU. No instruction needs a ComputeBudget instruction.
 
 ## Appendix: mutation tables
 

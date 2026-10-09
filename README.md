@@ -72,6 +72,8 @@ programs/core-vault/src/
                       pda_account.rs
 tests-rs/             LiteSVM integration tests (own Cargo workspace)
 tools/admin/          setl8-admin: the admin signing tool (own Cargo workspace; see docs/ADMIN-TOOL.md)
+tools/devnet-sector/   mock sector program: TEST SCAFFOLDING for the devnet rehearsal (own workspace; insecure by design)
+tools/devnet-rehearsal/ driver that runs the whole protocol on a real cluster (own workspace; see docs/DEVNET-REHEARSAL.md)
 tests/                Anchor TypeScript tests + admin test keypairs
 scripts/              build, test and deploy-gate scripts (see below)
 vault-repo-spec.md    original spec for this repo
@@ -188,6 +190,7 @@ Every withdrawal logs the pool, the amount, the withdrawable amount and the rese
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md): assets, actors, trust assumptions, attack trees, and what each compromise can do.
 - [`docs/DEPLOY-CHECKLIST.md`](docs/DEPLOY-CHECKLIST.md): devnet then mainnet, upgrade-authority handling, keeper duties, monitoring, incident steps.
 - [`docs/ADMIN-TOOL.md`](docs/ADMIN-TOOL.md): the admin signing ceremony (`tools/admin`).
+- [`docs/DEVNET-REHEARSAL.md`](docs/DEVNET-REHEARSAL.md): the devnet rehearsal (`tools/devnet-rehearsal`, `tools/devnet-sector`, `scripts/devnet-rehearsal.sh`): how to repeat it, what a real validator showed (95/95 checks on a local validator; the devnet run itself is pending a funded faucet), and what differs from LiteSVM.
 
 ## Design notes
 
