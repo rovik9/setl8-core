@@ -44,7 +44,7 @@ fn register_update_pause_reactivate_ceremonies_change_exactly_the_registry() {
     assert_eq!((r.fee_split_bps, r.max_payout_count, r.active), (6500, 5, true));
     assert_eq!(r.challenge_sizes.len(), 2);
     assert_eq!((r.challenge_sizes[1].size, r.challenge_sizes[1].cost), (50_000_000_000, 400_000_000));
-    assert_eq!(r.reset_price_bps, vec![100, 150]);
+    assert_eq!(r.reset_price_bps, vec![10_000, 11_500, 12_000, 12_750, 13_000]);
 
     let cfg2 = write_file(&w.dir, "product2.json", &product_json(&product, 7000));
     let (code, h) = w.ceremony("update-product-config", &["--config", &w.s(&cfg2), "--recent-blockhash"]);

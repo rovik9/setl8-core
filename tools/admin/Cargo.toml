@@ -24,9 +24,9 @@ localnet = ["core-vault/localnet"]
 
 [dependencies]
 core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint"] }
-# v0.4.1 has the correct admin_withdraw_marketing_funds builder. core-vault itself
-# stays on v0.4.0 (the program is frozen); the two are different packages to cargo.
-si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+# v0.4.1 has the correct admin_withdraw_marketing_funds builder; v0.5.0 documents
+# reset_price_bps as basis points of the tier price. core-vault itself is on v0.5.0 too.
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.5.0" }
 anchor-lang = "=0.32.1"
 anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }
 solana-keypair = "=2.2.3"

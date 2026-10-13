@@ -35,6 +35,14 @@
 //! plus 12 (chain state != model state), 13 (outcome / error code != the model's),
 //! 14 (rent lamports went to / came from the wrong account), 15 (an account is not at
 //! its canonical address or is not an account type of this program).
+//!
+//! PHASE-RESET PRICE: the model prices a `deposit_reset` as `ceil(tier cost * bps / 10_000)`
+//! where the tier is the registered entry whose size equals the failed record's size,
+//! looked up in the registry AS IT IS WHEN THE RESET IS SENT (a missing tier, or two
+//! entries of that size with different costs, is `InvalidChallengeTier`). The generator
+//! steers towards non-proportional tier prices, costs that do not divide evenly, a tier
+//! removed / repriced / duplicated by `update_product_config` between a failure and the
+//! reset (and re-added afterwards), and duplicate-size tiers.
 #![allow(clippy::too_many_arguments)]
 
 mod common;
@@ -237,6 +245,9 @@ struct Trader {
     last: i64,
     snap: i64,
     reset_used: bool,
+    /// The tier cost the record was bought at (test-side bookkeeping for coverage tags only;
+    /// it is never an input to a price).
+    paid: u64,
 }
 impl Trader {
     fn stale(&self, now: i64, paused_now: i64) -> bool {
@@ -467,6 +478,27 @@ fn ceil_bps(x: u64, bps: u64) -> u64 {
 fn floor_bps(x: u64, bps: u64) -> u64 {
     (x as u128 * bps as u128 / 10_000) as u64
 }
+/// The phase-reset price: `ceil(cost * bps / 10_000)`, `None` if it does not fit a u64.
+fn reset_price_model(cost: u64, bps: u16) -> Option<u64> {
+    u64::try_from((cost as u128 * bps as u128 + 9_999) / 10_000).ok()
+}
+/// The cost of THE tier of `size`: `None` when no tier has that size, or when tiers of that
+/// size disagree on the cost (ambiguous). Several tiers with the same cost are one price.
+fn model_tier_cost(tiers: &[(u64, u64)], size: u64) -> Option<u64> {
+    let mut costs: Vec<u64> = tiers.iter().filter(|t| t.0 == size).map(|t| t.1).collect();
+    costs.sort_unstable();
+    costs.dedup();
+    if costs.len() == 1 {
+        Some(costs[0])
+    } else {
+        None
+    }
+}
+/// What the model says a reset of a record of `size` costs at `phase`, if it can be priced.
+fn model_reset_amount(cfg: &PCfg, size: u64, phase: u8) -> Option<u64> {
+    let bps = *cfg.reset_bps.get(phase as usize)?;
+    reset_price_model(model_tier_cost(&cfg.tiers, size)?, bps)
+}
 
 impl Model {
     fn prod(&self, s: usize) -> Result<&Prod, Vec<E>> {
@@ -599,7 +631,7 @@ impl Model {
                 m.pay_split(*p, *c, *cost, bps);
                 m.traders.insert(
                     (*s, *p, *cid),
-                    Trader { size: *size, payout_count: 0, status: St::Active, last: now, snap: paused_now, reset_used: false },
+                    Trader { size: *size, payout_count: 0, status: St::Active, last: now, snap: paused_now, reset_used: false, paid: *cost },
                 );
                 evs.push(Ev::Created {
                     addr: self.w.sectors[*s].trader(&self.w.people[*p], *cid),
@@ -622,11 +654,15 @@ impl Model {
                 }
                 match pr.cfg.reset_bps.get(*phase as usize) {
                     None => e.push(ev(VaultError::InvalidResetPhase)),
-                    Some(&bps) => {
-                        if *amount != floor_bps(pt.size, bps as u64) {
-                            e.push(ev(VaultError::WrongAmount));
+                    Some(&bps) => match model_tier_cost(&pr.cfg.tiers, pt.size) {
+                        // no tier of this size (or two that disagree): never a size-based fallback
+                        None => e.push(ev(VaultError::InvalidChallengeTier)),
+                        Some(cost) => {
+                            if reset_price_model(cost, bps) != Some(*amount) {
+                                e.push(ev(VaultError::WrongAmount));
+                            }
                         }
-                    }
+                    },
                 }
                 if self.wallet[*p][*c] < *amount {
                     e.push(ev(VaultError::InsufficientTokenBalance));
@@ -642,12 +678,12 @@ impl Model {
                 }
                 let paused_now = pr.paused_secs_at(now);
                 let bps = pr.cfg.fee_bps as u64;
-                let (size, count) = (pt.size, pt.payout_count);
+                let (size, count, paid) = (pt.size, pt.payout_count, pt.paid);
                 m.pay_split(*p, *c, *amount, bps);
                 m.traders.get_mut(&(*s, *p, *prev)).unwrap().reset_used = true;
                 m.traders.insert(
                     (*s, *p, *new),
-                    Trader { size, payout_count: count, status: St::Active, last: now, snap: paused_now, reset_used: false },
+                    Trader { size, payout_count: count, status: St::Active, last: now, snap: paused_now, reset_used: false, paid },
                 );
                 evs.push(Ev::Created {
                     addr: self.w.sectors[*s].trader(&self.w.people[*p], *new),
@@ -1039,7 +1075,9 @@ fn det_pubkey(seed: u64, i: u64) -> Pubkey {
 }
 
 fn rand_cfg(rng: &mut Rng) -> PCfg {
-    const POOL: [(u64, u64); 9] = [
+    // (size, cost): prices are NOT proportional to size (2.5K costs $30, 100K costs $859), several
+    // costs do not divide evenly against the ladder, one is free
+    const POOL: [(u64, u64); 13] = [
         (10_000, 100),
         (50_000, 400),
         (12_345, 77),
@@ -1049,6 +1087,10 @@ fn rand_cfg(rng: &mut Rng) -> PCfg {
         (500_000, 0),
         (250_000_000, 1_999_999),
         (3_000, 1),
+        (2_500, 30),
+        (100_000, 859),
+        (2_500_000_000, 30_000_000),
+        (100_000_000_000, 859_000_000),
     ];
     let n = rng.range(1, 4) as usize;
     let mut tiers = vec![];
@@ -1058,8 +1100,19 @@ fn rand_cfg(rng: &mut Rng) -> PCfg {
             tiers.push(t);
         }
     }
-    let n_reset = rng.range(0, 3) as usize;
-    let reset_bps = (0..n_reset).map(|_| *rng.pick(&[0u16, 100, 150, 450, 1_000, 10_000])).collect();
+    if rng.pct(18) {
+        // a duplicate size: the same cost (harmless) or a different one (ambiguous for resets)
+        let (size, cost) = *rng.pick(&tiers.clone());
+        let other = if rng.pct(50) { cost } else { *rng.pick(&[0u64, 1, cost.saturating_add(1), cost.saturating_mul(2), 77]) };
+        tiers.insert(rng.idx(tiers.len() + 1), (size, other));
+    }
+    let n_reset = rng.range(0, 6) as usize;
+    let reset_bps = if rng.pct(60) {
+        // the lev ladder, or a prefix of it
+        LEV_LADDER[..n_reset.min(5)].to_vec()
+    } else {
+        (0..n_reset).map(|_| *rng.pick(&[0u16, 1, 100, 150, 450, 1_000, 10_000, 11_500, 12_750, 13_000, 20_000, u16::MAX])).collect()
+    };
     PCfg { fee_bps: *rng.pick(&[0u16, 1, 3_333, 4_000, 6_500, 6_500, 9_999, 10_000]), tiers, max_payout: rng.range(1, 4), reset_bps }
 }
 
@@ -1158,9 +1211,9 @@ impl Fuzz {
         // sector 0 is registered up front (through the normal, checked path)
         let cfg = PCfg {
             fee_bps: 6_500,
-            tiers: vec![(10_000, 100), (50_000, 400), (12_345, 77), (100_000_000, 99_000_000)],
+            tiers: vec![(10_000, 100), (50_000, 400), (12_345, 77), (100_000_000, 99_000_000), (2_500, 30), (100_000, 859)],
             max_payout: 3,
-            reset_bps: vec![100, 150, 450],
+            reset_bps: LEV_LADDER.to_vec(),
         };
         f.exec(Act::Register { s: 0, cfg });
         for p in 0..NP {
@@ -1467,7 +1520,11 @@ impl Fuzz {
                 let s = self.pick_sector(true);
                 let p = self.rng.idx(NP);
                 let c = self.pick_coin();
-                let tiers = self.m.prods[s].as_ref().map(|p| p.cfg.tiers.clone()).unwrap_or_else(|| vec![(10_000, 100)]);
+                let mut tiers = self.m.prods[s].as_ref().map(|p| p.cfg.tiers.clone()).unwrap_or_else(|| vec![(10_000, 100)]);
+                if tiers.is_empty() {
+                    // a registry whose only tier was removed by an update: still try to buy something
+                    tiers.push((10_000, 100));
+                }
                 let (size, cost) = if self.rng.pct(88) {
                     *self.rng.pick(&tiers)
                 } else {
@@ -1495,15 +1552,29 @@ impl Fuzz {
             4 => {
                 let (s, p, prev) = self.pick_trader(|_, t| t.status == St::Failed && !t.reset_used);
                 let c = self.pick_coin();
-                let phase = if self.rng.pct(85) { self.rng.range(0, 2) as u8 } else { self.rng.range(0, 12) as u8 };
-                let right = match (self.m.prods[s].as_ref(), self.m.traders.get(&(s, p, prev))) {
-                    (Some(pr), Some(t)) => pr.cfg.reset_bps.get(phase as usize).map(|&b| floor_bps(t.size, b as u64)),
-                    _ => None,
+                let phase = if self.rng.pct(85) { self.rng.range(0, 4) as u8 } else { self.rng.range(0, 12) as u8 };
+                let (right, decoy) = match (self.m.prods[s].as_ref(), self.m.traders.get(&(s, p, prev))) {
+                    (Some(pr), Some(t)) => {
+                        let bps = pr.cfg.reset_bps.get(phase as usize).copied();
+                        // when the tier is missing / ambiguous, offer the price of the FIRST tier of
+                        // that size, or the old size-based price: both must be refused
+                        let first = pr.cfg.tiers.iter().find(|x| x.0 == t.size).and_then(|x| bps.and_then(|b| reset_price_model(x.1, b)));
+                        let size_based = bps.map(|b| floor_bps(t.size, b as u64));
+                        (model_reset_amount(&pr.cfg, t.size, phase), if self.rng.pct(50) { first } else { size_based })
+                    }
+                    _ => (None, None),
                 };
                 let amount = match right {
                     Some(a) if self.rng.pct(85) => a,
-                    Some(a) => a.wrapping_add(self.rng.range(1, 3)),
-                    None => self.rng.range(0, 100),
+                    Some(a) => match self.rng.below(3) {
+                        0 => a.wrapping_sub(1),
+                        1 => a.wrapping_add(1),
+                        _ => a.wrapping_add(self.rng.range(1, 3)),
+                    },
+                    None => match decoy {
+                        Some(d) if self.rng.pct(80) => d,
+                        _ => self.rng.range(0, 100),
+                    },
                 };
                 Act::DepositReset { p, s, c, prev, new: self.rng.range(1, 9), amount, phase }
             }
@@ -1688,6 +1759,9 @@ impl Fuzz {
                         self.queue.push_back(Act::Payout { s: ts, p: tp, cid: tc, amount: 1_000, req: count + 1 });
                     }
                 }
+                if self.rng.pct(55) {
+                    self.steer_reset_update(s, &mut cfg);
+                }
                 Act::Update { s, cfg }
             }
             20 => Act::Pause { s: self.pick_sector(true) },
@@ -1701,6 +1775,65 @@ impl Fuzz {
                 Act::PoolFreeze { c, frozen }
             }
             _ => Act::Reactivate { s: self.pick_sector(true) },
+        }
+    }
+
+    /// Rewrites `cfg` (an update of sector `s`) so that it breaks or changes the price of a reset
+    /// that is already pending: the tier of a `Failed`, not yet reset record is removed,
+    /// repriced, or duplicated (same cost = harmless, different cost = ambiguous). Then the reset
+    /// of that record is queued with the price the NEW config implies, and sometimes the old
+    /// config is restored and the reset retried (a removed tier re-added works again).
+    fn steer_reset_update(&mut self, s: usize, cfg: &mut PCfg) {
+        let failed: Vec<(usize, usize, u64)> =
+            self.m.traders.iter().filter(|((ts, _, _), t)| *ts == s && t.status == St::Failed && !t.reset_used).map(|(k, _)| *k).collect();
+        let Some(pr) = self.m.prods[s].as_ref() else { return };
+        if failed.is_empty() {
+            return;
+        }
+        let key = *self.rng.pick(&failed);
+        let size = self.m.traders[&key].size;
+        let old = pr.cfg.clone();
+        // keep the current ladder most of the time so the queued reset has a phase to hit
+        if self.rng.pct(80) && !old.reset_bps.is_empty() {
+            cfg.reset_bps = old.reset_bps.clone();
+        }
+        let mut tiers: Vec<(u64, u64)> = old.tiers.clone();
+        let cost_now = model_tier_cost(&tiers, size);
+        match self.rng.below(5) {
+            0 => tiers.retain(|t| t.0 != size), // removed
+            1 => {
+                // repriced (a non-multiple cost, free, a huge cost: the price may not fit a u64)
+                let new_cost = *self.rng.pick(&[0u64, 1, 77, 859, cost_now.unwrap_or(100).saturating_add(1), cost_now.unwrap_or(100).saturating_mul(3), 1_999_999, u64::MAX]);
+                for t in tiers.iter_mut().filter(|t| t.0 == size) {
+                    t.1 = new_cost;
+                }
+                if tiers.iter().all(|t| t.0 != size) {
+                    tiers.push((size, new_cost));
+                }
+            }
+            2 => tiers.push((size, cost_now.unwrap_or(100).saturating_add(self.rng.range(1, 50)))), // ambiguous
+            3 => tiers.push((size, cost_now.unwrap_or(100))),                                        // same-cost duplicate
+            _ => {
+                // the size is replaced by neighbours only (no tier of that size at all)
+                tiers.retain(|t| t.0 != size);
+                tiers.push((size + 1, 100));
+            }
+        }
+        tiers.truncate(32);
+        cfg.tiers = tiers;
+        if cfg.valid().is_empty() {
+            let phase = if cfg.reset_bps.is_empty() { 0 } else { self.rng.idx(cfg.reset_bps.len()) as u8 };
+            let amount = model_reset_amount(cfg, size, phase).unwrap_or_else(|| self.rng.range(0, 200));
+            let (ts, tp, tprev) = key;
+            let coin = self.pick_coin();
+            let new = self.rng.range(10, 14);
+            self.queue.push_back(Act::DepositReset { p: tp, s: ts, c: coin, prev: tprev, new, amount, phase });
+            if self.rng.pct(45) {
+                // restore the registry that sold the tier, then retry at the old price
+                let amount = model_reset_amount(&old, size, phase).unwrap_or(0);
+                self.queue.push_back(Act::Update { s, cfg: old });
+                self.queue.push_back(Act::DepositReset { p: tp, s: ts, c: coin, prev: tprev, new: new + 1, amount, phase });
+            }
         }
     }
 
@@ -2171,6 +2304,9 @@ impl Fuzz {
                     );
                 }
                 self.assert_unchanged("a rejected instruction", &desc, &before, &after);
+                if let Some(t) = Self::reset_reject_tag(&self.m, &a) {
+                    self.stats.tag(t.to_string());
+                }
                 self.bump(kind, false);
                 if let Err(f) = &r {
                     if let TransactionError::InstructionError(_, anchor_lang::solana_program::instruction::error::InstructionError::Custom(code)) = &f.err {
@@ -2252,6 +2388,25 @@ impl Fuzz {
         self.check_all();
     }
 
+    /// Which reset-pricing rejection a refused `deposit_reset` was (judged on the pre-state model;
+    /// the real error code is matched against the model separately).
+    fn reset_reject_tag(m: &Model, a: &Act) -> Option<&'static str> {
+        let Act::DepositReset { s, p, prev, phase, .. } = a else { return None };
+        let pr = m.prods[*s].as_ref()?;
+        let pt = m.traders.get(&(*s, *p, *prev))?;
+        if !pr.active || pt.status != St::Failed || pt.reset_used {
+            return None;
+        }
+        let bps = *pr.cfg.reset_bps.get(*phase as usize)?;
+        let same: Vec<u64> = pr.cfg.tiers.iter().filter(|x| x.0 == pt.size).map(|x| x.1).collect();
+        match model_tier_cost(&pr.cfg.tiers, pt.size) {
+            None if same.is_empty() => Some("reset:rejected_tier_missing"),
+            None => Some("reset:rejected_tier_ambiguous"),
+            Some(cost) if reset_price_model(cost, bps).is_none() => Some("reset:rejected_price_does_not_fit_u64"),
+            Some(_) => None,
+        }
+    }
+
     /// Which interesting branches this accepted action walked through.
     fn tags_for(old: &Model, a: &Act, new: &Model, out: Out) -> Vec<String> {
         let mut t: Vec<String> = vec![];
@@ -2305,6 +2460,31 @@ impl Fuzz {
                     t.push("payout:queued".into());
                     if new.claims_total() >= CLAIMS_CEILING as u128 {
                         t.push("payout:filled_to_the_ceiling".into());
+                    }
+                }
+            }
+            Act::DepositReset { s, p, prev, phase, .. } => {
+                if let (Some(pr), Some(pt)) = (old.prods[*s].as_ref(), old.traders.get(&(*s, *p, *prev))) {
+                    if let (Some(cost), Some(&bps)) = (model_tier_cost(&pr.cfg.tiers, pt.size), pr.cfg.reset_bps.get(*phase as usize)) {
+                        t.push("reset:ok".into());
+                        if (cost as u128 * bps as u128) % 10_000 != 0 {
+                            t.push("reset:rounded_up".into());
+                        }
+                        if bps > 10_000 {
+                            t.push("reset:above_100_percent".into());
+                        }
+                        if cost == 0 {
+                            t.push("reset:free_tier".into());
+                        }
+                        if cost != pt.paid {
+                            t.push("reset:tier_repriced_since_purchase".into());
+                        }
+                        if pr.cfg.tiers.iter().filter(|x| x.0 == pt.size).count() > 1 {
+                            t.push("reset:duplicate_size_same_cost".into());
+                        }
+                        if reset_price_model(cost, bps) != Some(floor_bps(pt.size, bps as u64)) {
+                            t.push("reset:price_differs_from_size_based".into());
+                        }
                     }
                 }
             }
@@ -3018,6 +3198,15 @@ const REQUIRED_TAGS: &[&str] = &[
     "created_over_dust:request_payout",
     "created_over_dust:deposit_bond",
     "created_over_dust:register_product",
+    "reset:ok",
+    "reset:rounded_up",
+    "reset:above_100_percent",
+    "reset:tier_repriced_since_purchase",
+    "reset:duplicate_size_same_cost",
+    "reset:price_differs_from_size_based",
+    "reset:rejected_tier_missing",
+    "reset:rejected_tier_ambiguous",
+    "reset:rejected_price_does_not_fit_u64",
 ];
 
 /// Every reachable error of every instruction must have been produced (and matched
@@ -3027,7 +3216,7 @@ const REQUIRED_CODES: &[&str] = &[
     "register_product:6004", "register_product:6013", "register_product:6024", "register_product:0",
     "update_product_config:6024", "pause_product:6014", "reconcile_product:6014", "reconcile_product:6034",
     "deposit_fee:6001", "deposit_fee:6006", "deposit_fee:6023", "deposit_fee:0",
-    "deposit_reset:6001", "deposit_reset:6007", "deposit_reset:6011", "deposit_reset:6012", "deposit_reset:0",
+    "deposit_reset:6001", "deposit_reset:6006", "deposit_reset:6007", "deposit_reset:6011", "deposit_reset:6012", "deposit_reset:0",
     "record_activity:6005", "flag_trader_failed:6005", "mark_abandoned:6005", "mark_abandoned:6010",
     "request_payout:6001", "request_payout:6005", "request_payout:6008", "request_payout:6009", "request_payout:6015",
     "request_payout:6043", "request_bond_payout:6043",

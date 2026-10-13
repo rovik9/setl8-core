@@ -25,6 +25,10 @@ pub struct UpdateProductConfig<'info> {
     pub product_registry: Account<'info, ProductRegistry>,
 }
 
+/// `reset_price_bps` is in basis points of the TIER PRICE (`10_000` = 100%, rounded up),
+/// not of the account size. A reset is priced from the CURRENT `challenge_sizes`, so
+/// repricing or removing a tier changes or blocks resets of records already `Failed`.
+/// Sizes are deliberately not checked for duplicates; see `deposit_reset`.
 pub fn update_product_config(
     ctx: Context<UpdateProductConfig>,
     _product_program_id: Pubkey,

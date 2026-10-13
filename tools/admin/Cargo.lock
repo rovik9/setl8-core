@@ -866,7 +866,7 @@ version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
- "setl8-shared-interfaces 0.4.0",
+ "setl8-shared-interfaces 0.5.0",
 ]
 
 [[package]]
@@ -2702,7 +2702,7 @@ dependencies = [
  "serde",
  "serde_json",
  "setl8-shared-interfaces 0.4.0",
- "setl8-shared-interfaces 0.4.1",
+ "setl8-shared-interfaces 0.5.0",
  "sha2 0.10.9",
  "solana-account",
  "solana-hash",
@@ -2727,8 +2727,8 @@ dependencies = [
 
 [[package]]
 name = "setl8-shared-interfaces"
-version = "0.4.1"
-source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.4.1#8f5935227af524ebf012a8ea0ababf6bb43a4029"
+version = "0.5.0"
+source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.5.0#3b0580c47979387e03f11c280d93a5870c66cd3e"
 dependencies = [
  "borsh 0.10.4",
  "solana-program",

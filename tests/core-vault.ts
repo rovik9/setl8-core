@@ -252,7 +252,7 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     const challengeSizes: ChallengeSize[] = [{ size: 10_000, cost: 100 }];
 
     await send(
-      registerProductIx(fakeSectorProgramId, 6500, challengeSizes, 5, productRegistry, [100, 150, 450]),
+      registerProductIx(fakeSectorProgramId, 6500, challengeSizes, 5, productRegistry, [10000, 11500, 12000, 12750, 13000]),
       [sl8Admin, rovAdmin]
     );
 
@@ -265,7 +265,7 @@ describe("core-vault: Module 1 — ProductRegistry + CPI Gateway", () => {
     assert.isTrue(registry.active);
     assert.equal(registry.totalRequestsEmitted, 0n);
     assert.equal(registry.challengeSizes.length, 1);
-    assert.deepEqual(registry.resetPriceBps, [100, 150, 450]);
+    assert.deepEqual(registry.resetPriceBps, [10000, 11500, 12000, 12750, 13000]);
     assert.equal(registry.pauseReason, 0);
     assert.equal(registry.pausedSince, 0n);
   });

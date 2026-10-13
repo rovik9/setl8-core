@@ -49,6 +49,8 @@ pub mod core_vault {
         instructions::init_vault(ctx, usdc_mint, usdt_mint)
     }
 
+    /// Registers a sector program. `reset_price_bps` is basis points of the TIER PRICE
+    /// (`10_000` = 100%, rounded up). See `instructions::admin::register_product`.
     pub fn register_product(
         ctx: Context<RegisterProduct>,
         product_program_id: Pubkey,
@@ -67,6 +69,8 @@ pub mod core_vault {
         )
     }
 
+    /// Replaces a product's config. `reset_price_bps` is basis points of the TIER PRICE
+    /// (`10_000` = 100%, rounded up). See `instructions::admin::update_product_config`.
     pub fn update_product_config(
         ctx: Context<UpdateProductConfig>,
         product_program_id: Pubkey,
@@ -122,7 +126,8 @@ pub mod core_vault {
         instructions::deposit_fee(ctx, amount, product_program_id, challenge_id, trader_wallet, account_size)
     }
 
-    /// Phase-specific reset of a `Failed` record. See `instructions::sector::deposit_reset`.
+    /// Phase-specific reset of a `Failed` record, priced at `ceil(tier cost * reset_price_bps[phase] / 10_000)`:
+    /// basis points of the TIER PRICE, not of the account size. See `instructions::sector::deposit_reset`.
     pub fn deposit_reset(
         ctx: Context<DepositReset>,
         amount: u64,

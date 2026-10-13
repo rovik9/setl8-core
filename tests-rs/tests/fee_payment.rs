@@ -20,7 +20,9 @@ enum Kind {
 
 /// Registered product (+ funded trader) ready to make one payment of `amount`.
 /// Fee:   buys tier (SIZE, cost = amount) as challenge 1.
-/// Reset: challenge 1 (tier SIZE) is Failed; resets it into challenge 2 at phase 1.
+/// Reset: challenge 1 (tier SIZE, bought at cost 1) is Failed; the tier is then repriced to
+///        cost `x` (the reset price follows the CURRENT tier cost) and challenge 1 is reset
+///        into challenge 2 at phase 1 (150 bps of the tier price).
 struct Rig {
     e: Env,
     s: Sector,
@@ -36,11 +38,12 @@ const PHASE: u8 = 1;
 const PHASE_BPS: u64 = 150;
 
 impl Rig {
-    /// `x` = the fee (Fee) or the account size whose phase-1 price is paid (Reset).
+    /// `x` = the fee (Fee) or the tier cost whose phase-1 price is paid (Reset).
     fn new(kind: Kind, split_bps: u16, x: u64) -> Rig {
         let (size, amount) = match kind {
             Kind::Fee => (SIZE, x),
-            Kind::Reset => (x, (x as u128 * PHASE_BPS as u128 / 10_000) as u64),
+            // independent ceil(x * 150 / 10_000); None only if it did not fit u64
+            Kind::Reset => (SIZE, reset_amount(x, PHASE_BPS as u16).unwrap()),
         };
         let cfg = Cfg {
             fee_split_bps: split_bps,
@@ -58,6 +61,8 @@ impl Rig {
         if kind == Kind::Reset {
             e.deposit_tier(&s, &w, 1, (size, 1));
             e.flag(&s, &w, 1);
+            // the price pivot: reprice the tier to `x` so the reset amount is `ceil(x * 150 / 10_000)`
+            e.update(&s, &Cfg { tiers: vec![ChallengeSize { size, cost: x }], ..cfg.clone() });
         }
         if split_bps > 10_000 {
             e.set_registry(&s, |r| r.fee_split_bps = split_bps);
@@ -286,8 +291,9 @@ fn split_above_100_percent_fails_closed(kind: Kind) {
 for_both!(fee_split_bps_above_10000_is_rejected, split_above_100_percent_fails_closed);
 
 fn zero_amount_moves_nothing(kind: Kind) {
-    // Fee: tier cost 0. Reset: price floors to 0 (99 * 150 / 10_000 = 1.485 -> 1? use 66 -> 0.99 -> 0)
-    let mut r = Rig::new(kind, 6500, if kind == Kind::Fee { 0 } else { 66 });
+    // Fee: tier cost 0. Reset: a free tier (cost 0) gives a free reset. (The reset price is
+    // rounded UP now, so a tiny positive cost like 66 -> ceil(0.99) = 1 is no longer zero.)
+    let mut r = Rig::new(kind, 6500, 0);
     assert_eq!(r.amount, 0);
     r.e.fund_wallet_with(&r.w.clone(), 0, 0); // even an empty wallet can "pay" nothing
     let before = r.e.token_snapshot();

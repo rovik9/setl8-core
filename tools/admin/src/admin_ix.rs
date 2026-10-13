@@ -142,7 +142,7 @@ impl ProductConfig {
             warnings.push("a tier has size 0; the program accepts this".to_string());
         }
         if self.reset_price_bps.iter().any(|b| *b > 10_000) {
-            warnings.push("a reset price is above 100% of the account size; the program accepts this".to_string());
+            warnings.push("a reset price is above 100% of the tier price (the lev-trading ladder is 100%-130%); the program accepts any value".to_string());
         }
         if self.max_payout_count == 0 {
             warnings.push("max_payout_count is 0: no trader of this product can ever request a payout".to_string());
@@ -477,7 +477,7 @@ fn product_lines(p: &Product) -> Vec<String> {
         v.push("no tiers".to_string());
     }
     v.push(format!(
-        "reset prices (bps of account size, by phase): {}",
+        "reset prices (bps of the TIER PRICE, 10000 = 100%, rounded up, by phase): {}",
         if p.reset_price_bps.is_empty() {
             "none".to_string()
         } else {

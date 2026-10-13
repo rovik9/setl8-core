@@ -1423,8 +1423,8 @@ dependencies = [
 
 [[package]]
 name = "setl8-shared-interfaces"
-version = "0.4.0"
-source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.4.0#f49f979a2c55733d71a28df4c8976240168171b4"
+version = "0.5.0"
+source = "git+https://github.com/rovik9/setl8-turbo?tag=v0.5.0#3b0580c47979387e03f11c280d93a5870c66cd3e"
 dependencies = [
  "anchor-lang",
  "borsh 0.10.4",

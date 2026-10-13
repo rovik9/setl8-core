@@ -135,8 +135,18 @@ pub struct Cfg {
 
 pub const TIER_A: (u64, u64) = (10_000, 100);
 pub const TIER_B: (u64, u64) = (50_000, 400);
-/// Chosen so `size * bps / 10_000` does not divide evenly (floor behaviour).
+/// Chosen so `cost * bps / 10_000` does not divide evenly for most of the ladder (round-up behaviour).
 pub const TIER_ODD: (u64, u64) = (12_345, 77);
+
+/// The lev-trading phase-reset ladder: 100%, 115%, 120%, 127.5%, 130% of the TIER PRICE.
+pub const LEV_LADDER: [u16; 5] = [10_000, 11_500, 12_000, 12_750, 13_000];
+
+/// The phase-reset price, computed independently of the program and of the shared
+/// helper: `ceil(tier_cost * bps / 10_000)` in u128 (`None` if it does not fit a u64).
+pub fn reset_amount(tier_cost: u64, bps: u16) -> Option<u64> {
+    let p = (tier_cost as u128 * bps as u128 + 9_999) / 10_000;
+    u64::try_from(p).ok()
+}
 
 impl Default for Cfg {
     fn default() -> Self {
@@ -147,7 +157,7 @@ impl Default for Cfg {
                 .map(|&(size, cost)| ChallengeSize { size, cost })
                 .collect(),
             max_payout: 5,
-            reset_bps: vec![100, 150, 450],
+            reset_bps: LEV_LADDER.to_vec(),
         }
     }
 }

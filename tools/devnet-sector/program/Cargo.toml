@@ -20,7 +20,7 @@ solana-program = "=2.3.0"
 # the borsh the shared-interfaces crate uses (0.10)
 borsh = "=0.10.4"
 solana-system-interface = { version = "=1.0.0", features = ["bincode"] }
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.5.0" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

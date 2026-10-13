@@ -26,6 +26,12 @@ fn big_cfg() -> Cfg {
     }
 }
 
+/// 32 tiers (sizes 10_000..10_031, costs 100..131) and a full 8-phase reset ladder: the
+/// largest registry `deposit_reset` ever has to scan for the failed record's tier.
+fn big_reset_cfg() -> Cfg {
+    Cfg { reset_bps: vec![10_000, 11_500, 12_000, 12_750, 13_000, 13_000, 13_000, 13_000], ..big_cfg() }
+}
+
 #[test]
 fn every_instruction_fits_the_compute_budget() {
     let mut rows: Vec<(&str, u64, u64)> = vec![];
@@ -69,6 +75,17 @@ fn every_instruction_fits_the_compute_budget() {
     let _ = fund;
     let ix = reset_ix(&e, &s, &w2, 1, 2, 100, 0);
     add("deposit_reset", e.ok(ix).compute_units_consumed, DEFAULT_LIMIT);
+    // worst case for the tier scan: 32 registered tiers and the failed record's tier is the last
+    // one, so the lookup walks all 32 entries (it is a full scan either way: it must also detect
+    // an ambiguous duplicate)
+    let w4 = wallet();
+    e.update(&s, &big_reset_cfg());
+    e.deposit_tier(&s, &w4, 1, (10_031, 131));
+    e.flag(&s, &w4, 1);
+    e.fund_wallet(&w4);
+    let ix = reset_ix(&e, &s, &w4, 1, 2, reset_amount(131, 13_000).unwrap(), 4); // 130% of 131 = 170.3 -> 171
+    add("deposit_reset (32 tiers, tier is the last)", e.ok(ix).compute_units_consumed, DEFAULT_LIMIT);
+    e.update(&s, &Cfg::default());
     e.deposit(&s, &w3, 1);
     e.advance(8 * DAY);
     let caller = e.new_caller();
@@ -126,5 +143,5 @@ fn every_instruction_fits_the_compute_budget() {
     for (n, cu, lim) in &rows {
         println!("{n:<52} {cu:>9}  {lim}");
     }
-    assert_eq!(rows.len(), 21, "one row per measured case");
+    assert_eq!(rows.len(), 22, "one row per measured case");
 }

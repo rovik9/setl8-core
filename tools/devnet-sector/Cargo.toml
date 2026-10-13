@@ -16,8 +16,8 @@ overflow-checks = true
 [dev-dependencies]
 mock-sector = { path = "program", features = ["no-entrypoint"] }
 core-vault = { path = "../../programs/core-vault", features = ["no-entrypoint", "localnet"] }
-# v0.4.1 (what the mock sector builds against); core-vault itself still pulls v0.4.0, a different package to cargo.
-si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.1" }
+# v0.5.0 (what the mock sector builds against, same as core-vault).
+si = { package = "setl8-shared-interfaces", git = "https://github.com/rovik9/setl8-turbo", tag = "v0.5.0" }
 borsh = "=0.10.4"
 anchor-lang = "=0.32.1"
 anchor-spl = { version = "=0.32.1", default-features = false, features = ["token"] }

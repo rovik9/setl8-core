@@ -1,4 +1,5 @@
-//! deposit_reset: one phase-priced restart from a Failed record.
+//! deposit_reset: one phase-priced restart from a Failed record. The price is a percentage
+//! of the TIER PRICE (see reset_price.rs for the tier-lookup, rounding and pricing-pivot cases).
 mod common;
 use anchor_lang::error::ErrorCode;
 use anchor_lang::solana_program::pubkey::Pubkey;
@@ -6,8 +7,9 @@ use common::*;
 use core_vault::errors::VaultError;
 use solana_signer::Signer;
 
-fn price(size: u64, bps: u16) -> u64 {
-    (size as u128 * bps as u128 / 10_000) as u64
+/// The reset price of a tier costing `cost` at `bps` (independent of the program).
+fn price(cost: u64, bps: u16) -> u64 {
+    reset_amount(cost, bps).unwrap()
 }
 
 /// Registered product + a Failed record `id 1` at `tier`.
@@ -26,12 +28,12 @@ fn reset(e: &mut Env, s: &Sector, w: &Pubkey, prev: u64, new: u64, amount: u64, 
 }
 
 #[test]
-fn price_is_account_size_times_bps_over_10000_for_every_phase_and_tier() {
+fn price_is_tier_cost_times_bps_over_10000_rounded_up_for_every_phase_and_tier() {
     let cfg = Cfg::default();
     for tier in [TIER_A, TIER_B, TIER_ODD] {
         for (phase, bps) in cfg.reset_bps.iter().enumerate() {
             let (mut e, s, w) = failed(&cfg, tier);
-            let want = price(tier.0, *bps);
+            let want = price(tier.1, *bps);
             assert_ok(reset(&mut e, &s, &w, 1, 2, want, phase as u8));
             assert_eq!(e.trader(&s, &w, 2).status, TraderStatus::Active, "tier {tier:?} phase {phase}");
         }
@@ -39,21 +41,25 @@ fn price_is_account_size_times_bps_over_10000_for_every_phase_and_tier() {
 }
 
 #[test]
-fn price_table_spot_values_including_floor_rounding() {
-    // tier A (10_000): 100 / 150 / 450 ; tier ODD (12_345): floor(123.45)=123, floor(185.175)=185, floor(555.525)=555
-    assert_eq!([100u16, 150, 450].map(|b| price(TIER_A.0, b)), [100, 150, 450]);
-    assert_eq!([100u16, 150, 450].map(|b| price(TIER_ODD.0, b)), [123, 185, 555]);
+fn price_table_spot_values_including_round_up() {
+    // tier A (cost 100): 100 / 115 / 120 / 128 (127.5 up) / 130
+    assert_eq!(LEV_LADDER.map(|b| price(TIER_A.1, b)), [100, 115, 120, 128, 130]);
+    // tier ODD (cost 77): 77 / ceil(88.55)=89 / ceil(92.4)=93 / ceil(98.175)=99 / ceil(100.1)=101
+    assert_eq!(LEV_LADDER.map(|b| price(TIER_ODD.1, b)), [77, 89, 93, 99, 101]);
     let (mut e, s, w) = failed(&Cfg::default(), TIER_ODD);
-    // one lamport above the floored price is wrong, the floor is right
-    assert_vault_err(&reset(&mut e, &s, &w, 1, 2, 186, 1), VaultError::WrongAmount);
-    assert_ok(reset(&mut e, &s, &w, 1, 2, 185, 1));
+    // the floor (88) and one above the ceiling (90) are wrong; the ceiling is right
+    assert_vault_err(&reset(&mut e, &s, &w, 1, 2, 88, 1), VaultError::WrongAmount);
+    assert_vault_err(&reset(&mut e, &s, &w, 1, 2, 90, 1), VaultError::WrongAmount);
+    assert_ok(reset(&mut e, &s, &w, 1, 2, 89, 1));
 }
 
 #[test]
 fn wrong_amount_is_rejected_without_side_effects() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    let right = price(TIER_A.0, 150);
-    for bad in [right + 1, right - 1, 0, TIER_A.1, TIER_B.1, u64::MAX] {
+    let right = price(TIER_A.1, LEV_LADDER[1]);
+    // includes the OLD size-based price (10_000 * 11_500 / 10_000), which must now be refused
+    let old_size_based = TIER_A.0 * LEV_LADDER[1] as u64 / 10_000;
+    for bad in [right + 1, right - 1, 0, TIER_A.1, TIER_B.1, old_size_based, u64::MAX] {
         let r = reset(&mut e, &s, &w, 1, 2, bad, 1);
         assert_vault_err(&r, VaultError::WrongAmount);
     }
@@ -64,7 +70,7 @@ fn wrong_amount_is_rejected_without_side_effects() {
 #[test]
 fn phase_beyond_the_table_is_invalid() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    for phase in [3u8, 4, 255] {
+    for phase in [5u8, 6, 255] {
         let r = reset(&mut e, &s, &w, 1, 2, 100, phase);
         assert_vault_err(&r, VaultError::InvalidResetPhase);
     }
@@ -80,7 +86,7 @@ fn product_without_a_reset_table_offers_no_resets() {
 
 #[test]
 fn only_failed_records_can_be_reset() {
-    let amount = price(TIER_A.0, 100);
+    let amount = price(TIER_A.1, LEV_LADDER[0]);
 
     // Active
     let (mut e, s) = Env::registered(&Cfg::default());
@@ -108,13 +114,13 @@ fn only_failed_records_can_be_reset() {
 #[test]
 fn a_failed_record_can_be_reset_only_once() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
-    let amount = price(TIER_A.0, 100);
+    let amount = price(TIER_A.1, LEV_LADDER[0]);
     assert_ok(reset(&mut e, &s, &w, 1, 2, amount, 0));
     let first_new = e.svm.get_account(&s.trader(&w, 2)).unwrap().data;
 
     // same prev, different new id, any phase/price
-    for phase in 0..3u8 {
-        let amt = price(TIER_A.0, [100u16, 150, 450][phase as usize]);
+    for phase in 0..5u8 {
+        let amt = price(TIER_A.1, LEV_LADDER[phase as usize]);
         let r = reset(&mut e, &s, &w, 1, 3 + phase as u64, amt, phase);
         assert_vault_err(&r, VaultError::ResetNotAllowed);
         assert!(e.trader_opt(&s, &w, 3 + phase as u64).is_none());
@@ -126,7 +132,7 @@ fn a_failed_record_can_be_reset_only_once() {
 fn new_challenge_id_equal_to_prev_fails() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
     let before = e.svm.get_account(&s.trader(&w, 1)).unwrap().data;
-    let r = reset(&mut e, &s, &w, 1, 1, price(TIER_A.0, 100), 0);
+    let r = reset(&mut e, &s, &w, 1, 1, price(TIER_A.1, LEV_LADDER[0]), 0);
     assert_already_in_use(&r);
     assert_eq!(e.svm.get_account(&s.trader(&w, 1)).unwrap().data, before, "prev must be untouched");
 }
@@ -136,7 +142,7 @@ fn new_challenge_id_that_already_exists_fails() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
     e.deposit(&s, &w, 9); // an unrelated live record
     let before = e.svm.get_account(&s.trader(&w, 9)).unwrap().data;
-    let r = reset(&mut e, &s, &w, 1, 9, price(TIER_A.0, 100), 0);
+    let r = reset(&mut e, &s, &w, 1, 9, price(TIER_A.1, LEV_LADDER[0]), 0);
     assert_already_in_use(&r);
     assert_eq!(e.svm.get_account(&s.trader(&w, 9)).unwrap().data, before);
     assert!(!e.trader(&s, &w, 1).reset_used, "failed reset must not burn the single use");
@@ -159,7 +165,7 @@ fn new_record_inherits_from_prev_and_prev_is_marked_used() {
 
     let prev_before = e.trader(&s, &w, 1);
     assert_eq!(prev_before.payout_count, 1);
-    assert_ok(reset(&mut e, &s, &w, 1, 2, price(TIER_B.0, 150), 1));
+    assert_ok(reset(&mut e, &s, &w, 1, 2, price(TIER_B.1, LEV_LADDER[1]), 1));
 
     let new = e.trader(&s, &w, 2);
     assert_eq!(new.trader_wallet, w);
@@ -191,7 +197,7 @@ fn new_record_inherits_from_prev_and_prev_is_marked_used() {
 fn rejected_while_product_is_paused() {
     let (mut e, s, w) = failed(&Cfg::default(), TIER_A);
     e.pause(&s);
-    let amount = price(TIER_A.0, 100);
+    let amount = price(TIER_A.1, LEV_LADDER[0]);
     assert_vault_err(&reset(&mut e, &s, &w, 1, 2, amount, 0), VaultError::ProductNotActive);
     assert!(e.trader_opt(&s, &w, 2).is_none());
     assert!(!e.trader(&s, &w, 1).reset_used);
@@ -239,6 +245,7 @@ fn unknown_prev_record_is_rejected() {
 fn run_chain(tier: (u64, u64)) {
     let cfg = Cfg::default();
     let size = tier.0;
+    let cost = tier.1;
     let (mut e, s) = Env::registered(&cfg);
     let w = wallet();
 
@@ -253,12 +260,12 @@ fn run_chain(tier: (u64, u64)) {
     let mut consumed: Vec<u64> = vec![];
     for (step, phase) in [0u8, 1, 2].into_iter().enumerate() {
         let (prev, new) = (step as u64 + 1, step as u64 + 2);
-        let amount = price(size, cfg.reset_bps[phase as usize]);
+        let amount = price(cost, cfg.reset_bps[phase as usize]);
         e.advance(DAY);
 
         // the previous phase's price (or any other phase's) is the wrong price here
         if step > 0 {
-            let stale_price = price(size, cfg.reset_bps[phase as usize - 1]);
+            let stale_price = price(cost, cfg.reset_bps[phase as usize - 1]);
             if stale_price != amount {
                 assert_vault_err(&reset(&mut e, &s, &w, prev, new, stale_price, phase), VaultError::WrongAmount);
                 assert!(e.trader_opt(&s, &w, new).is_none());
@@ -325,10 +332,10 @@ fn run_chain(tier: (u64, u64)) {
 
 #[test]
 fn chained_resets_are_unlimited_and_carry_state_even_prices() {
-    run_chain(TIER_B); // 50_000: 500 / 750 / 2_250 exactly
+    run_chain(TIER_B); // cost 400: 400 / 460 / 480 exactly
 }
 
 #[test]
-fn chained_resets_are_unlimited_and_carry_state_floored_prices() {
-    run_chain(TIER_ODD); // 12_345: 123 / 185 / 555 (floor)
+fn chained_resets_are_unlimited_and_carry_state_rounded_up_prices() {
+    run_chain(TIER_ODD); // cost 77: 77 / 89 / 93 (rounded up)
 }

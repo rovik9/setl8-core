@@ -188,7 +188,7 @@ OTHER OPTIONS
 
 product.json: {\"product_program_id\":\"<pk>\",\"fee_split_bps\":6500,
   \"challenge_sizes\":[{\"size\":10000000000,\"cost\":100000000}],
-  \"max_payout_count\":5,\"reset_price_bps\":[100,150]}
+  \"max_payout_count\":5,\"reset_price_bps\":[10000,11500,12000,12750,13000]}
 ";
 
 const INSPECT_HELP: &str = "\

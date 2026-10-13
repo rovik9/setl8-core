@@ -75,7 +75,7 @@ fn register_initializes_every_registry_field() {
     assert_eq!(r.max_payout_count, 5);
     assert!(r.active);
     assert_eq!(r.total_requests_emitted, 0);
-    assert_eq!(r.reset_price_bps, vec![100, 150, 450]);
+    assert_eq!(r.reset_price_bps, LEV_LADDER.to_vec());
     assert_eq!(r.pause_reason, PAUSE_NONE);
     assert_eq!(r.paused_since, 0);
     assert_eq!(r.total_paused_secs, 0);

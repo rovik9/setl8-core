@@ -50,4 +50,7 @@ anchor-spl = { version = "0.32.1", default-features = false, features = ["token"
 # (sl8_admin is writable: it pays the registry rent). v0.3.2 was docs-only.
 # v0.4.0 adds the payout-tally layout (PayoutTally, derive_payout_tally) and
 # documents the queued request_payout; no existing wire format changed.
-setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.4.0" }
+# v0.5.0 changes the MEANING of reset_price_bps (basis points of the TIER PRICE,
+# not of the account size) and adds the shared `reset_price` helper that
+# deposit_reset calls; no wire change.
+setl8-shared-interfaces = { git = "https://github.com/rovik9/setl8-turbo", tag = "v0.5.0" }

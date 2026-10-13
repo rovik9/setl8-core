@@ -38,6 +38,10 @@ pub struct RegisterProduct<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// `reset_price_bps` is in basis points of the TIER PRICE (`10_000` = 100%, rounded up),
+/// not of the account size: a phase reset costs `ceil(tier cost * bps / 10_000)` of the
+/// `challenge_sizes` entry matching the failed record's size. Values above 10_000 are
+/// allowed. Sizes are deliberately not checked for duplicates; see `deposit_reset`.
 pub fn register_product(
     ctx: Context<RegisterProduct>,
     product_program_id: Pubkey,

@@ -25,8 +25,11 @@ pub struct ProductRegistry {
     /// (the stale/Abandoned path does not count). Reconciled against the sector's
     /// payout tally by `reconcile_product`.
     pub total_requests_emitted: u64,
-    /// Phase-reset prices in basis points of account size, indexed by the
-    /// 0-based phase a trader failed in. Empty = no phase resets offered.
+    /// Phase-reset prices in basis points of the TIER PRICE (the `cost` of the
+    /// `challenge_sizes` entry whose `size` equals the failed record's account
+    /// size), `10_000` = 100%, rounded up, indexed by the 0-based phase a trader
+    /// failed in. Values above 10_000 are allowed (e.g. lev-trading
+    /// `[10000, 11500, 12000, 12750, 13000]`). Empty = no phase resets offered.
     pub reset_price_bps: Vec<u16>,
     /// Why the product is paused (`PAUSE_*`), `PAUSE_NONE` when active.
     pub pause_reason: u8,

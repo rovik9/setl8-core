@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Mint, Token, TokenAccount};
+use setl8_shared_interfaces::{reset_price, ChallengeSize};
 
 use crate::constants::{
     PRODUCT_REGISTRY_SEED, ROV_ADMIN_PUBKEY, SL8_ADMIN_PUBKEY, TRADER_STATE_SEED, VAULT_STATE_SEED,
@@ -103,7 +104,34 @@ pub struct DepositReset<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-/// Phase-specific reset: restart at a reduced price instead of a full rebuy.
+/// The `cost` of the one registered tier whose `size` equals `account_size`.
+///
+/// Several entries with the same size are fine as long as they all cost the same;
+/// entries with the same size and DIFFERENT costs are ambiguous. No match or an
+/// ambiguous match is `InvalidChallengeTier`.
+fn tier_cost_for_size(tiers: &[ChallengeSize], account_size: u64) -> Result<u64> {
+    let mut cost: Option<u64> = None;
+    for tier in tiers.iter().filter(|t| t.size == account_size) {
+        match cost {
+            None => cost = Some(tier.cost),
+            Some(c) => require!(c == tier.cost, VaultError::InvalidChallengeTier),
+        }
+    }
+    cost.ok_or_else(|| error!(VaultError::InvalidChallengeTier))
+}
+
+/// Phase-specific reset: restart at a price that is a percentage of the tier price.
+///
+/// The price is `ceil(tier_cost * reset_price_bps[reset_phase] / 10_000)` (the shared
+/// `setl8_shared_interfaces::reset_price`, in `u128`, rounded up): basis points of the
+/// TIER PRICE, `10_000` = 100%, not of the account size. `tier_cost` is the `cost` of
+/// the registered `challenge_sizes` entry whose `size` equals the failed record's
+/// `account_size`, read from the registry as it is NOW (a tier repriced after the
+/// purchase changes the reset price; a removed tier blocks the reset until it is
+/// re-added). No such tier, or two tiers of that size with different costs, is
+/// `InvalidChallengeTier`; a price that does not fit in a `u64` is `WrongAmount`.
+/// A free tier (cost 0) gives a free reset. There is no upper bound on the bps: a
+/// reset above 100% of the tier price is by design.
 ///
 /// The vault copies `payout_count` and `account_size` from the previous
 /// record itself, so a sector bug can never give a reset trader more payouts
@@ -138,11 +166,12 @@ pub fn deposit_reset(
         .reset_price_bps
         .get(reset_phase as usize)
         .ok_or(VaultError::InvalidResetPhase)?;
-    let expected = (prev.account_size as u128)
-        .checked_mul(bps as u128)
-        .ok_or(VaultError::MathOverflow)?
-        / 10_000u128;
-    require!(amount as u128 == expected, VaultError::WrongAmount);
+    // The reset is priced off the tier the trader originally bought, found by
+    // account size in the CURRENT registry. No registered tier (or an ambiguous
+    // one) is an error; there is deliberately no size-based fallback.
+    let tier_cost = tier_cost_for_size(&registry.challenge_sizes, prev.account_size)?;
+    let expected = reset_price(tier_cost, bps).ok_or(VaultError::WrongAmount)?;
+    require!(amount == expected, VaultError::WrongAmount);
 
     let (pool_amount, sl8_amount) =
         plan_payment(amount, registry.fee_split_bps, &ctx.accounts.trader_token_account)?;

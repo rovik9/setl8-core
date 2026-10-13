@@ -538,7 +538,7 @@ impl AdminIxDirect {
 /// A product.json body for `product`.
 pub fn product_json(product: &Pubkey, fee_split_bps: u16) -> String {
     format!(
-        r#"{{"product_program_id":"{product}","fee_split_bps":{fee_split_bps},"challenge_sizes":[{{"size":10000000000,"cost":100000000}},{{"size":50000000000,"cost":400000000}}],"max_payout_count":5,"reset_price_bps":[100,150]}}"#
+        r#"{{"product_program_id":"{product}","fee_split_bps":{fee_split_bps},"challenge_sizes":[{{"size":10000000000,"cost":100000000}},{{"size":50000000000,"cost":400000000}}],"max_payout_count":5,"reset_price_bps":[10000,11500,12000,12750,13000]}}"#
     )
 }
 
