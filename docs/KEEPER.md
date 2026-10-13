@@ -147,7 +147,7 @@ The keeper is its own Cargo workspace with its own `Cargo.lock`, seeded from `to
 |---|---|---|
 | `setl8-admin` (path) | 0.1.0 | the JSON-RPC client (`HttpRpc`), key-file loading with the permission check, `Keys` (vault / pool / registry addresses), cluster and genesis constants, the panic hook |
 | `core-vault` (path) | 0.1.0 | account types, instruction structs, error enum, `MAX_SETTLE_BATCH`, `HEARTBEAT_MIN_GAP_SECS`, `OPEN_CLAIMS_CEILING` |
-| `setl8-shared-interfaces` (git tag) | v0.4.1 | `derive_payout_tally` (the tally address of a product's sector) |
+| `setl8-shared-interfaces` (git tag) | v0.5.0 | `derive_payout_tally` (the tally address of a product's sector) |
 | `anchor-lang`, `anchor-spl` (`token` only) | =0.32.1 | `Pubkey`, account decoding, the SPL Token account layout |
 | `solana-keypair`, `solana-signer`, `solana-signature`, `solana-message`, `solana-hash` | =2.2.3, =2.2.1, =2.3.0, =2.4.0, =2.3.0 | signing and building legacy transactions |
 | `bs58`, `base64`, `bincode`, `serde_json` | =0.5.1, =0.22.1, =1.3.3, =1.0.151 | RPC filters and payloads, the transaction wire format, JSON log lines |

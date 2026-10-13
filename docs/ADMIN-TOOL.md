@@ -90,10 +90,12 @@ Replace `<c>` with `devnet`, `mainnet` or `localnet`, and `<NONCE>` with the non
 ```json
 {"product_program_id": "<sector program id>", "fee_split_bps": 6500,
  "challenge_sizes": [{"size": 10000000000, "cost": 100000000}],
- "max_payout_count": 5, "reset_price_bps": [100, 150]}
+ "max_payout_count": 5, "reset_price_bps": [10000, 11500, 12000, 12750, 13000]}
 ```
 
-`plan` prints a warning for things the program accepts but that are usually a typo (a free tier, `max_payout_count` 0, a reset price above 100%).
+`reset_price_bps` is in basis points of the **tier price** (the `cost` of the tier whose `size` equals the failed record's size), `10000` = 100%, rounded up, indexed by the 0-based phase the trader failed in. The example is the lev-trading ladder: 100%, 115%, 120%, 127.5%, 130%. There is no upper bound, and the register plan prints the table as "bps of the TIER PRICE". Do not use the old meaning (basis points of the account size): `[100, 150]` now prices a reset at 1% and 1.5% of the tier price. Never reprice or remove a tier with `update-product-config` while `Failed` records exist (SR-22).
+
+`plan` prints a warning for things the program accepts but that are usually a typo (a free tier, `max_payout_count` 0, a reset price above 100% of the tier price, which the lev ladder itself triggers: it is information, not an error).
 
 For `admin-withdraw`, `plan` reads the live pool (RPC) and **refuses** an amount above what the 25% reserve leaves (`max(stored floor, ceil(25% of the live balance))`), a frozen pool, a missing or frozen SL8 destination account and a zero amount. `--offline` skips that and says so. `inspect` works without a network and says so; with `--rpc` it re-checks the mint against the vault's own record and the amount against the pool as it is now.
 
@@ -179,7 +181,7 @@ The tool is a separate workspace; its lockfile was seeded from `tests-rs/Cargo.l
 | crate | version | why |
 |---|---|---|
 | `core-vault` (path) | 0.1.0 | the program's own seeds, PDA derivation, account types, instruction structs, error enum, limits and the admin pubkeys (`localnet` feature mirrors the program) |
-| `setl8-shared-interfaces` (git tag) | v0.4.1 | instruction builders for the five admin instructions that have one; v0.4.1 has the correct `admin_withdraw_marketing_funds` builder. The program itself stays on v0.4.0 (it is frozen); cargo treats them as different packages, and `ChallengeSize` is converted field by field |
+| `setl8-shared-interfaces` (git tag) | v0.5.0 | instruction builders for the five admin instructions that have one; v0.4.1 added the correct `admin_withdraw_marketing_funds` builder and v0.5.0 documents `reset_price_bps` as basis points of the tier price (no wire change). The program is on v0.5.0 too |
 | `anchor-lang` | =0.32.1 | `Pubkey`, instruction/account serialisation traits (the version the program uses) |
 | `anchor-spl` (`token` only) | =0.32.1 | the SPL Token account layout (no Token-2022) |
 | `solana-keypair` | =2.2.3 | reading a keypair file and signing |
