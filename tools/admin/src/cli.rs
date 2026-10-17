@@ -106,7 +106,7 @@ fn parse(cmd: &str, args: &[String], spec: &[(&str, K)]) -> Result<Parsed> {
 }
 
 fn pk(name: &str, s: &str) -> Result<Pubkey> {
-    s.parse().map_err(|_| Error(format!("--{name}: '{s}' is not a valid public key")))
+    s.parse().map_err(|_| Error(format!("--{name}: '{}' is not a valid public key", crate::cluster::safe_echo(s))))
 }
 
 fn keys_of(p: &Parsed) -> Result<Keys> {
@@ -271,7 +271,7 @@ fn plan_cmd(host: &mut dyn Host, args: &[String]) -> Result<()> {
     let name =
         p.pos.first().ok_or_else(|| Error("plan needs an instruction name (see `setl8-admin plan --help`)".into()))?;
     if p.pos.len() > 1 {
-        return Err(Error(format!("unexpected argument '{}'", p.pos[1])));
+        return Err(Error(format!("unexpected argument '{}'", crate::cluster::safe_echo(&p.pos[1]))));
     }
     let keys = keys_of(&p)?;
     let cluster = cluster_of(&p)?;
@@ -301,7 +301,12 @@ fn plan_cmd(host: &mut dyn Host, args: &[String]) -> Result<()> {
             amount: parse_amount(p.need("amount")?)?,
             mint: p.get("mint").map(|m| pk("mint", m)).transpose()?,
         },
-        other => return Err(Error(format!("unknown instruction '{other}' (see `setl8-admin plan --help`)"))),
+        other => {
+            return Err(Error(format!(
+                "unknown instruction '{}' (see `setl8-admin plan --help`)",
+                crate::cluster::safe_echo(other)
+            )))
+        }
     };
     let fee_payer = match p.get("fee-payer") {
         Some(f) => pk("fee-payer", f)?,
@@ -428,7 +433,7 @@ fn status_cmd(host: &mut dyn Host, args: &[String]) -> Result<()> {
     let spec = [("cluster", K::Val), ("rpc", K::Val), ("program-id", K::Val)];
     let p = parse("status", args, &spec)?;
     if !p.pos.is_empty() {
-        return Err(Error(format!("unexpected argument '{}'", p.pos[0])));
+        return Err(Error(format!("unexpected argument '{}'", crate::cluster::safe_echo(&p.pos[0]))));
     }
     let keys = keys_of(&p)?;
     let cluster = cluster_of(&p)?;
@@ -449,7 +454,7 @@ fn nonce_cmd(host: &mut dyn Host, name: &str, args: &[String]) -> Result<()> {
     ];
     let p = parse(name, args, &spec)?;
     if !p.pos.is_empty() {
-        return Err(Error(format!("unexpected argument '{}'", p.pos[0])));
+        return Err(Error(format!("unexpected argument '{}'", crate::cluster::safe_echo(&p.pos[0]))));
     }
     let cluster = cluster_of(&p)?;
     let key_path = PathBuf::from(p.need("keypair")?);
@@ -512,7 +517,9 @@ pub fn run(host: &mut dyn Host, args: &[String]) -> i32 {
             "send" => send_cmd(host, rest).map(|_| 0),
             "status" => status_cmd(host, rest).map(|_| 0),
             "nonce-create" | "nonce-advance" => nonce_cmd(host, cmd, rest).map(|_| 0),
-            other => Err(Error(format!("unknown command '{other}' (try `setl8-admin help`)"))),
+            other => {
+                Err(Error(format!("unknown command '{}' (try `setl8-admin help`)", crate::cluster::safe_echo(other))))
+            }
         }
     })();
     match result {

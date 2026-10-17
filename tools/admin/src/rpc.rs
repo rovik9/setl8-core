@@ -39,9 +39,44 @@ pub trait Rpc {
     fn confirm(&self, signature: &str) -> Result<()>;
 }
 
+/// The part of an RPC URL that is safe to print: the host (and port), never the scheme, userinfo,
+/// path, query or fragment, because API keys travel in all of those. Anything that does not parse as
+/// a plain host comes back as a placeholder rather than as a fragment of the URL.
 pub fn host_of(url: &str) -> String {
-    let rest = url.split("://").nth(1).unwrap_or(url);
-    rest.split(['/', '?']).next().unwrap_or(rest).to_string()
+    const HIDDEN: &str = "<host hidden>";
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
+    let before_query = rest.split(['?', '#']).next().unwrap_or("");
+    let host = match authority.rsplit_once('@') {
+        Some((_, h)) => h,
+        // an `@` after the first `/` cannot be told apart from a password that contains a `/`
+        None if before_query.contains('@') => return HIDDEN.to_string(),
+        None => authority,
+    };
+    if is_plain_host(host) {
+        host.to_string()
+    } else {
+        HIDDEN.to_string()
+    }
+}
+
+/// `name`, `a.b.c`, `1.2.3.4` or `[::1]`, optionally followed by `:<digits>`.
+fn is_plain_host(h: &str) -> bool {
+    let (name, port) = match h.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((a, rest)) => (a, rest.strip_prefix(':')),
+            None => return false,
+        },
+        None => match h.split_once(':') {
+            Some((a, p)) => (a, Some(p)),
+            None => (h, None),
+        },
+    };
+    let name_ok = !name.is_empty()
+        && name.len() <= 253
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'));
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()));
+    name_ok && port_ok
 }
 
 pub struct HttpRpc {
@@ -193,5 +228,16 @@ mod tests {
     fn urls_never_leak_their_query_in_errors() {
         assert_eq!(host_of("https://mainnet.helius-rpc.com/?api-key=SECRET"), "mainnet.helius-rpc.com");
         assert_eq!(host_of("http://127.0.0.1:8899"), "127.0.0.1:8899");
+        assert_eq!(host_of("https://user:pw@rpc.example.com/KEY?k=1"), "rpc.example.com");
+        assert_eq!(host_of("https://rpc.example.com:8899#frag"), "rpc.example.com:8899");
+        assert_eq!(host_of("http://[::1]:8899/x"), "[::1]:8899");
+        assert_eq!(host_of("https://user:pa/ss@rpc.example.com/"), "<host hidden>");
+        assert_eq!(host_of("https://rpc.example.com/v2/@KEY"), "<host hidden>");
+        assert_eq!(host_of("https://rpc.example.com:KEY/"), "<host hidden>");
+        assert_eq!(host_of("https://KEY/x@rpc.example.com/"), "<host hidden>");
+        assert_eq!(host_of("https://KEY=abc/"), "<host hidden>");
+        assert_eq!(host_of("https://a b.example.com/"), "<host hidden>");
+        assert_eq!(host_of("https://:8899/"), "<host hidden>");
+        assert_eq!(host_of("rpc.example.com/KEY"), "rpc.example.com");
     }
 }

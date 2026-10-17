@@ -22,14 +22,14 @@ pub fn check_permissions(path: &Path, allow_loose: bool) -> Result<Option<String
     {
         use std::os::unix::fs::PermissionsExt;
         let meta = std::fs::metadata(path)
-            .map_err(|e| Error(format!("cannot read key file {}: {}", path.display(), e.kind())))?;
+            .map_err(|e| Error(format!("cannot read key file {}: {}", crate::cluster::safe_path(path), e.kind())))?;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             let msg = format!(
                 "key file {} has mode {:03o}: other users can read it. Fix with: chmod 600 {}",
-                path.display(),
+                crate::cluster::safe_path(path),
                 mode,
-                path.display()
+                crate::cluster::safe_path(path)
             );
             if allow_loose {
                 return Ok(Some(format!("WARNING: {msg} (continuing because of --allow-loose-perms)")));
@@ -46,12 +46,12 @@ pub fn check_permissions(path: &Path, allow_loose: bool) -> Result<Option<String
 
 pub fn load_keypair(path: &Path, allow_loose: bool) -> Result<LoadedKey> {
     let warning = check_permissions(path, allow_loose)?;
-    let mut raw =
-        std::fs::read(path).map_err(|e| Error(format!("cannot read key file {}: {}", path.display(), e.kind())))?;
+    let mut raw = std::fs::read(path)
+        .map_err(|e| Error(format!("cannot read key file {}: {}", crate::cluster::safe_path(path), e.kind())))?;
     let generic = || {
         Error(format!(
             "{} is not a keypair file (expected a JSON array of 64 numbers, as written by solana-keygen)",
-            path.display()
+            crate::cluster::safe_path(path)
         ))
     };
     let parsed: std::result::Result<Vec<u8>, _> = serde_json::from_slice(&raw);

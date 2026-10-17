@@ -597,13 +597,169 @@ fn product_config_errors_and_warnings_surface_in_plan() {
     let (c, h) = plan(&cfg(
         "e.json",
         format!(
-            r#"{{"product_program_id":"{p}","fee_split_bps":1,"challenge_sizes":[{{"size":5,"cost":0}}],"max_payout_count":0,"reset_price_bps":[20000]}}"#
+            r#"{{"product_program_id":"{p}","fee_split_bps":1,"challenge_sizes":[{{"size":5,"cost":0}}],"max_payout_count":0,"reset_price_bps":[4999]}}"#
         ),
     ));
     assert_eq!(c, 0, "{}{}", h.out, h.err);
-    for w_ in ["cost 0", "max_payout_count is 0", "above 100%"] {
+    for w_ in ["cost 0", "max_payout_count is 0", "old percent-of-account-size table"] {
         assert!(h.out.contains(w_), "missing warning '{w_}': {}", h.out);
     }
+}
+
+/// Plans a register-product with this reset table and returns (exit code, stdout).
+fn plan_with_resets(bps: &str) -> (i32, String) {
+    let w = World::with_vault();
+    let p = Pubkey::new_unique();
+    let body = format!(
+        r#"{{"product_program_id":"{p}","fee_split_bps":100,"challenge_sizes":[{{"size":10000000000,"cost":100000000}}],"max_payout_count":5,"reset_price_bps":{bps}}}"#
+    );
+    let cfg = w.s(&write_file(&w.dir, "c.json", &body));
+    let (c, h) = w.run(
+        &[],
+        &[
+            "plan",
+            "register-product",
+            "--cluster",
+            "localnet",
+            "--out",
+            &w.s(&w.path("r.json")),
+            "--config",
+            &cfg,
+            "--recent-blockhash",
+        ],
+    );
+    (c, format!("{}{}", h.out, h.err))
+}
+
+const OLD_TABLE_WARNING: &str = "old percent-of-account-size table";
+const LADDER_LINE: &str = "reset prices as a percentage of the tier price, by phase:";
+
+#[test]
+fn the_lev_ladder_gets_no_reset_warning_and_is_shown_as_percentages() {
+    let (c, out) = plan_with_resets("[10000,11500,12000,12750,13000]");
+    assert_eq!(c, 0, "{out}");
+    assert!(!out.contains(OLD_TABLE_WARNING) && !out.contains("above 100%"), "{out}");
+    assert!(out.contains(&format!("{LADDER_LINE} 100%, 115%, 120%, 127.5%, 130%")), "{out}");
+    // the inspector reads it back from the message bytes, so a signer sees it too
+    let w = World::with_vault();
+    let p = Pubkey::new_unique();
+    let body = format!(
+        r#"{{"product_program_id":"{p}","fee_split_bps":100,"challenge_sizes":[{{"size":10000000000,"cost":100000000}}],"max_payout_count":5,"reset_price_bps":[10000,11500,12000,12750,13000]}}"#
+    );
+    let cfg = w.s(&write_file(&w.dir, "c.json", &body));
+    let (c, h) = w.run(
+        &[],
+        &[
+            "plan",
+            "register-product",
+            "--cluster",
+            "localnet",
+            "--out",
+            &w.s(&w.path("r.json")),
+            "--config",
+            &cfg,
+            "--recent-blockhash",
+        ],
+    );
+    assert_eq!(c, 0, "{}{}", h.out, h.err);
+    let (c, h) = w.inspect("r.json", &[]);
+    assert_eq!(c, 0, "{}{}", h.out, h.err);
+    assert!(h.out.contains("100%, 115%, 120%, 127.5%, 130%") && !h.out.contains(OLD_TABLE_WARNING), "{}", h.out);
+}
+
+#[test]
+fn an_old_percent_of_account_size_table_warns_but_is_not_refused() {
+    let (c, out) = plan_with_resets("[100,150,450]");
+    assert_eq!(c, 0, "a warning, not a refusal: {out}");
+    assert!(out.contains(OLD_TABLE_WARNING) && out.contains("less than 50% of the tier price"), "{out}");
+    assert!(out.contains(&format!("{LADDER_LINE} 1%, 1.5%, 4.5%")), "{out}");
+    let (c, out) = plan_with_resets("[100,150]");
+    assert_eq!(c, 0, "{out}");
+    assert!(out.contains(OLD_TABLE_WARNING), "{out}");
+}
+
+#[test]
+fn the_reset_warning_threshold_is_exactly_5000() {
+    for (table, warns) in [
+        ("[4999]", true),
+        ("[5000]", false),
+        ("[5001]", false),
+        ("[10000,4999]", true),
+        ("[0]", true),
+        ("[20000]", false),
+        ("[65535]", false),
+        ("[]", false),
+    ] {
+        let (c, out) = plan_with_resets(table);
+        assert_eq!(c, 0, "{table}: {out}");
+        assert_eq!(out.contains(OLD_TABLE_WARNING), warns, "{table}: {out}");
+        assert!(!out.contains("above 100%"), "no warning for a high price: {table}: {out}");
+        assert!(out.contains(LADDER_LINE), "the ladder line is unconditional: {table}: {out}");
+    }
+    let (_, out) = plan_with_resets("[]");
+    assert!(out.contains(&format!("{LADDER_LINE} none")), "{out}");
+}
+
+// ------------------------------------------------------------------ duplicate tier sizes
+
+fn tiers_json(tiers: &[(u64, u64)]) -> String {
+    tiers.iter().map(|(s, c)| format!(r#"{{"size":{s},"cost":{c}}}"#)).collect::<Vec<_>>().join(",")
+}
+
+fn plan_tiers(w: &World, instruction: &str, product: &Pubkey, tiers: &[(u64, u64)], out: &str) -> (i32, TestHost) {
+    let body = format!(
+        r#"{{"product_program_id":"{product}","fee_split_bps":100,"challenge_sizes":[{}],"max_payout_count":5,"reset_price_bps":[10000]}}"#,
+        tiers_json(tiers)
+    );
+    let cfg = w.s(&write_file(&w.dir, &format!("cfg-{out}"), &body));
+    w.run(
+        &[],
+        &[
+            "plan",
+            instruction,
+            "--cluster",
+            "localnet",
+            "--out",
+            &w.s(&w.path(out)),
+            "--config",
+            &cfg,
+            "--recent-blockhash",
+        ],
+    )
+}
+
+#[test]
+fn plan_refuses_a_repeated_tier_size_for_register_and_update_and_writes_nothing() {
+    let w = World::with_vault();
+    // the product must exist for update-product-config to get as far as its own checks
+    let prod = Pubkey::new_unique();
+    let (c, h) = plan_tiers(&w, "register-product", &prod, &[(10, 5)], "ok.json");
+    assert_eq!(c, 0, "{}{}", h.out, h.err);
+    for (n, tiers) in [
+        ("different cost", vec![(100u64, 5u64), (100, 6)]),
+        ("same cost", vec![(100, 5), (100, 5)]),
+        ("far apart", vec![(100, 5), (200, 5), (300, 5), (100, 9)]),
+    ] {
+        for ins in ["register-product", "update-product-config"] {
+            let out = format!("dup-{ins}.json");
+            let (c, h) = plan_tiers(&w, ins, &prod, &tiers, &out);
+            assert_eq!(c, 1, "{n} / {ins}: {}{}", h.out, h.err);
+            assert!(h.err.contains("lists the size 100 more than once"), "{n} / {ins}: {}", h.err);
+            assert!(h.err.contains("Give each size one entry"), "{}", h.err);
+            assert!(!w.path(&out).exists(), "{n} / {ins}: nothing is written");
+            assert!(h.prompts.is_empty());
+        }
+    }
+}
+
+#[test]
+fn plan_accepts_32_distinct_sizes_and_the_same_cost_on_different_sizes() {
+    let w = World::with_vault();
+    let prod = Pubkey::new_unique();
+    let tiers: Vec<(u64, u64)> = (1..=32).map(|i| (i * 1_000_000, 7)).collect();
+    let (c, h) = plan_tiers(&w, "register-product", &prod, &tiers, "r.json");
+    assert_eq!(c, 0, "{}{}", h.out, h.err);
+    assert!(w.path("r.json").exists());
 }
 
 // ------------------------------------------------------------------ withdrawal pre-flight

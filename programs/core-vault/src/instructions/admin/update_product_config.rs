@@ -7,6 +7,7 @@ use crate::constants::{
 };
 use crate::errors::VaultError;
 use crate::state::ProductRegistry;
+use crate::utils::require_distinct_sizes;
 
 #[derive(Accounts)]
 #[instruction(product_program_id: Pubkey)]
@@ -28,7 +29,11 @@ pub struct UpdateProductConfig<'info> {
 /// `reset_price_bps` is in basis points of the TIER PRICE (`10_000` = 100%, rounded up),
 /// not of the account size. A reset is priced from the CURRENT `challenge_sizes`, so
 /// repricing or removing a tier changes or blocks resets of records already `Failed`.
-/// Sizes are deliberately not checked for duplicates; see `deposit_reset`.
+///
+/// Two `challenge_sizes` entries with the same `size` are refused (`DuplicateChallengeSize`),
+/// whether their costs are equal or not, and the refusal leaves the old config in place.
+/// `deposit_reset` still scans every entry and refuses an ambiguous one
+/// (`InvalidChallengeTier`) as defence in depth.
 pub fn update_product_config(
     ctx: Context<UpdateProductConfig>,
     _product_program_id: Pubkey,
@@ -45,6 +50,8 @@ pub fn update_product_config(
     // The pool's share of a payment can't exceed the payment. (Also guarded at
     // payment time as defense in depth.)
     require!(fee_split_bps as u128 <= BPS_DENOMINATOR, VaultError::InvalidFeeSplit);
+    // Last, so every config that was already refused keeps its error code.
+    require_distinct_sizes(&challenge_sizes)?;
 
     let registry = &mut ctx.accounts.product_registry;
     registry.challenge_sizes = challenge_sizes;

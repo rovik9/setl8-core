@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use anchor_lang::prelude::Pubkey;
 use solana_signature::Signature;
 
-use crate::admin_ix::{AdminIx, Keys, Side};
+use crate::admin_ix::{first_duplicate_size, AdminIx, Keys, Side};
 use crate::cluster::{is_mainnet_genesis, label_for_genesis};
 use crate::constants::TX_FILE_FORMAT;
 use crate::error::Result;
@@ -245,6 +245,16 @@ pub fn inspect(file: &TxFile, keys: &Keys, expect: &Expect, rpc: Option<&dyn Rpc
 
     // signatures
     let mut problems = classified.problems.clone();
+    if let Some(p) = &classified.parts {
+        if let AdminIx::RegisterProduct(prod) | AdminIx::UpdateProductConfig(prod) = &p.admin {
+            if let Some(size) = first_duplicate_size(&prod.challenge_sizes) {
+                problems.push(format!(
+                    "the tier size {size} is listed more than once; the program refuses that ({})",
+                    p.admin.name()
+                ));
+            }
+        }
+    }
     let mut seen: HashMap<String, usize> = HashMap::new();
     for e in &file.signatures {
         *seen.entry(e.pubkey.clone()).or_default() += 1;

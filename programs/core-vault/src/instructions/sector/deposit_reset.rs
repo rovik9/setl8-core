@@ -106,9 +106,13 @@ pub struct DepositReset<'info> {
 
 /// The `cost` of the one registered tier whose `size` equals `account_size`.
 ///
-/// Several entries with the same size are fine as long as they all cost the same;
-/// entries with the same size and DIFFERENT costs are ambiguous. No match or an
-/// ambiguous match is `InvalidChallengeTier`.
+/// `register_product` and `update_product_config` refuse two entries of the same size
+/// (`DuplicateChallengeSize`), so a registry written by this version has at most one
+/// match. The scan still looks at EVERY entry, on purpose and as defence in depth: a
+/// registry written before that check existed may hold several entries of one size.
+/// They are fine as long as they all cost the same; entries with the same size and
+/// DIFFERENT costs are ambiguous. No match or an ambiguous match is
+/// `InvalidChallengeTier`.
 fn tier_cost_for_size(tiers: &[ChallengeSize], account_size: u64) -> Result<u64> {
     let mut cost: Option<u64> = None;
     for tier in tiers.iter().filter(|t| t.size == account_size) {

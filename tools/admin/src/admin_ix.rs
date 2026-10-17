@@ -97,6 +97,22 @@ pub struct ProductConfig {
     pub reset_price_bps: Vec<u16>,
 }
 
+/// A reset price below this (50% of the tier price) is almost certainly a table written for the old
+/// meaning of the field, a percentage of the account size such as `[100, 150, 450]`, which would
+/// price a reset at 1% to 4.5% of the tier price. The lev ladder is 10000..13000.
+pub const RESET_PRICE_WARN_BELOW_BPS: u16 = 5_000;
+
+/// The first `size` that appears in two entries of the list (the same rule as the program's
+/// `DuplicateChallengeSize` check), if any.
+pub fn first_duplicate_size(tiers: &[Tier]) -> Option<u64> {
+    for (i, a) in tiers.iter().enumerate() {
+        if tiers[i + 1..].iter().any(|b| b.size == a.size) {
+            return Some(a.size);
+        }
+    }
+    None
+}
+
 /// A validated product configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Product {
@@ -134,6 +150,14 @@ impl ProductConfig {
         if self.fee_split_bps > 10_000 {
             return Err(Error(format!("fee_split_bps {} is above 10,000", self.fee_split_bps)));
         }
+        // The program refuses two entries with the same `size` (even with the same cost), so refuse here
+        // first: a signer should never be asked to sign a transaction that cannot succeed.
+        if let Some(dup) = first_duplicate_size(&self.challenge_sizes) {
+            return Err(Error(format!(
+                "challenge_sizes lists the size {dup} more than once; the program refuses two tiers of the same size \
+                 (a reset is priced from the one tier of the record's size). Give each size one entry."
+            )));
+        }
         let mut warnings = vec![];
         if self.challenge_sizes.iter().any(|t| t.cost == 0) {
             warnings.push("a tier has cost 0 (a free challenge); the program accepts this".to_string());
@@ -141,8 +165,12 @@ impl ProductConfig {
         if self.challenge_sizes.iter().any(|t| t.size == 0) {
             warnings.push("a tier has size 0; the program accepts this".to_string());
         }
-        if self.reset_price_bps.iter().any(|b| *b > 10_000) {
-            warnings.push("a reset price is above 100% of the tier price (the lev-trading ladder is 100%-130%); the program accepts any value".to_string());
+        if self.reset_price_bps.iter().any(|b| *b < RESET_PRICE_WARN_BELOW_BPS) {
+            warnings.push(format!(
+                "a reset price is below {}% of the tier price: this looks like an old percent-of-account-size table; a reset would cost less than {}% of the tier price (the program accepts any value)",
+                RESET_PRICE_WARN_BELOW_BPS / 100,
+                RESET_PRICE_WARN_BELOW_BPS / 100
+            ));
         }
         if self.max_payout_count == 0 {
             warnings.push("max_payout_count is 0: no trader of this product can ever request a payout".to_string());
@@ -484,7 +512,29 @@ fn product_lines(p: &Product) -> Vec<String> {
             p.reset_price_bps.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")
         }
     ));
+    v.push(format!(
+        "reset prices as a percentage of the tier price, by phase: {}",
+        reset_ladder_percent(&p.reset_price_bps)
+    ));
     v
+}
+
+/// `[10000, 11500, 12750]` -> `100%, 115%, 127.5%` (`none` for an empty table).
+pub fn reset_ladder_percent(bps: &[u16]) -> String {
+    if bps.is_empty() {
+        return "none".to_string();
+    }
+    bps.iter()
+        .map(|b| {
+            let (whole, frac) = (b / 100, b % 100);
+            match frac {
+                0 => format!("{whole}%"),
+                f if f % 10 == 0 => format!("{whole}.{}%", f / 10),
+                f => format!("{whole}.{f:02}%"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The vault's other twelve instructions, so a misuse is named rather than "unknown".
@@ -586,7 +636,7 @@ mod tests {
         let base = |n_tiers: usize, n_phases: usize, fee: u16| ProductConfig {
             product_program_id: Pubkey::new_unique().to_string(),
             fee_split_bps: fee,
-            challenge_sizes: vec![Tier { size: 1, cost: 1 }; n_tiers],
+            challenge_sizes: (0..n_tiers as u64).map(|i| Tier { size: i + 1, cost: 1 }).collect(),
             max_payout_count: 1,
             reset_price_bps: vec![100; n_phases],
         };
@@ -600,5 +650,81 @@ mod tests {
         let (_, w) = ProductConfig { max_payout_count: 0, ..base(1, 1, 1) }.validate().unwrap();
         assert!(w.iter().any(|x| x.contains("max_payout_count")));
         assert!(ProductConfig::parse(r#"{"product_program_id":"x","fee_split_bps":1,"challenge_sizes":[],"max_payout_count":1,"reset_price_bps":[],"extra":1}"#).is_err());
+    }
+
+    fn with_resets(bps: Vec<u16>) -> Vec<String> {
+        ProductConfig {
+            product_program_id: Pubkey::new_unique().to_string(),
+            fee_split_bps: 1,
+            challenge_sizes: vec![Tier { size: 1, cost: 1 }],
+            max_payout_count: 1,
+            reset_price_bps: bps,
+        }
+        .validate()
+        .unwrap()
+        .1
+    }
+
+    #[test]
+    fn reset_table_warning_is_for_old_percent_tables_only() {
+        let warns = |bps: Vec<u16>| with_resets(bps).iter().any(|w| w.contains("old percent-of-account-size table"));
+        assert!(!warns(vec![10_000, 11_500, 12_000, 12_750, 13_000]), "the lev ladder");
+        assert!(warns(vec![100, 150, 450]));
+        assert!(warns(vec![100, 150]));
+        assert!(warns(vec![4_999]));
+        assert!(!warns(vec![5_000]));
+        assert!(!warns(vec![]));
+        assert!(!warns(vec![20_000, u16::MAX]), "no upper bound");
+        assert!(!with_resets(vec![20_000]).iter().any(|w| w.contains("above 100%")));
+    }
+
+    #[test]
+    fn the_ladder_is_printed_as_percentages_of_the_tier_price() {
+        assert_eq!(reset_ladder_percent(&[]), "none");
+        assert_eq!(reset_ladder_percent(&[10_000, 11_500, 12_000, 12_750, 13_000]), "100%, 115%, 120%, 127.5%, 130%");
+        assert_eq!(reset_ladder_percent(&[100, 150, 450, 1, 12_705]), "1%, 1.5%, 4.5%, 0.01%, 127.05%");
+    }
+
+    fn with_tiers(tiers: Vec<Tier>) -> Result<(Product, Vec<String>)> {
+        ProductConfig {
+            product_program_id: Pubkey::new_unique().to_string(),
+            fee_split_bps: 1,
+            challenge_sizes: tiers,
+            max_payout_count: 1,
+            reset_price_bps: vec![10_000],
+        }
+        .validate()
+    }
+
+    #[test]
+    fn a_repeated_tier_size_is_refused_whatever_the_cost() {
+        let t = |size, cost| Tier { size, cost };
+        for tiers in [
+            vec![t(5, 1), t(5, 2)],                   // different cost
+            vec![t(5, 1), t(5, 1)],                   // same cost
+            vec![t(1, 1), t(2, 1), t(1, 9)],          // not adjacent
+            vec![t(1, 1), t(2, 1), t(3, 1), t(3, 1)], // the LAST pair
+            vec![t(7, 1), t(2, 1), t(3, 1), t(7, 1)], // first and last
+            vec![t(0, 1), t(0, 1)],                   // size 0 twice
+        ] {
+            let e = with_tiers(tiers.clone()).unwrap_err();
+            assert!(e.0.contains("more than once"), "{tiers:?}: {e}");
+        }
+        assert!(with_tiers(vec![]).is_ok());
+        assert!(with_tiers(vec![t(5, 1)]).is_ok());
+        assert!(with_tiers(vec![t(5, 1), t(6, 1), t(0, 1)]).is_ok());
+        assert!(with_tiers(vec![t(5, 1), t(6, 1), t(5 + (1 << 40), 1)]).is_ok());
+        // the same COST with different sizes is fine
+        assert!(with_tiers(vec![t(1, 7), t(2, 7), t(3, 7)]).is_ok());
+        assert_eq!(first_duplicate_size(&[t(1, 1), t(2, 1), t(2, 5)]), Some(2));
+        assert_eq!(first_duplicate_size(&[t(1, 1), t(2, 1)]), None);
+        assert_eq!(first_duplicate_size(&[]), None);
+    }
+
+    #[test]
+    fn the_count_limit_is_checked_before_duplicates() {
+        // 33 entries of one size: the count is the first error a signer reads
+        let e = with_tiers(vec![Tier { size: 1, cost: 1 }; 33]).unwrap_err();
+        assert!(e.0.contains("33 challenge sizes"), "{e}");
     }
 }

@@ -54,6 +54,7 @@ pub const VAULT_ERRORS: &[(u32, &str)] = table![
     BondIndexMismatch,
     WithdrawalExceedsReserve,
     ClaimsCeilingExceeded,
+    DuplicateChallengeSize,
 ];
 
 /// `6030` to `ClaimAlreadySettled`; `None` for a code that is not the vault's.
@@ -110,9 +111,10 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_real_enum() {
-        assert_eq!(VAULT_ERRORS.len(), 44);
+        assert_eq!(VAULT_ERRORS.len(), 45);
         assert_eq!(VAULT_ERRORS.first().unwrap().0, 6000);
-        assert_eq!(VAULT_ERRORS.last().unwrap(), &(6043, "ClaimsCeilingExceeded"));
+        assert_eq!(VAULT_ERRORS.last().unwrap(), &(6044, "DuplicateChallengeSize"));
+        assert_eq!(VAULT_ERRORS[VAULT_ERRORS.len() - 2], (6043, "ClaimsCeilingExceeded"));
         for (i, (c, _)) in VAULT_ERRORS.iter().enumerate() {
             assert_eq!(*c as usize, 6000 + i, "codes are consecutive");
         }

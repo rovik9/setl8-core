@@ -311,7 +311,7 @@ pub fn plan(host: &mut dyn Host, req: &PlanRequest, out: &Path) -> Result<TxFile
     }
     file.save(out)?;
 
-    host.out(&format!("Wrote {}\n\n", out.display()));
+    host.out(&format!("Wrote {}\n\n", crate::cluster::safe_path(out)));
     for l in parts.admin.describe() {
         host.out(&format!("  {l}\n"));
     }

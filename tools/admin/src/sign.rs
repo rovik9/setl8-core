@@ -67,7 +67,7 @@ pub fn sign_file(host: &mut dyn Host, input: &Path, out: &Path, key_path: &Path,
     file.add_signature(&signer, &sig, &bytes, &insp.classified.required_signers)?;
     file.save(out)?;
     let after = inspect(&file, &opts.keys, &opts.expect, None)?;
-    host.out(&format!("\nSigned as {signer}. Wrote {}.\n", out.display()));
+    host.out(&format!("\nSigned as {signer}. Wrote {}.\n", crate::cluster::safe_path(out)));
     report_progress(host, &after);
     Ok(())
 }
@@ -90,7 +90,7 @@ pub fn add_signature(
     let changed = file.add_signature(pubkey, signature, &bytes, &insp.classified.required_signers)?;
     if changed {
         file.save(out)?;
-        host.out(&format!("Signature of {pubkey} verified and added. Wrote {}.\n", out.display()));
+        host.out(&format!("Signature of {pubkey} verified and added. Wrote {}.\n", crate::cluster::safe_path(out)));
     } else {
         host.out(&format!("{pubkey} already has this exact signature in the file; nothing changed.\n"));
     }

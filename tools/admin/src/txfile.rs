@@ -54,7 +54,7 @@ impl TxFile {
             format: TX_FILE_FORMAT.to_string(),
             message_b64: base64::engine::general_purpose::STANDARD.encode(message),
             message_sha256: sha256_hex(message),
-            cluster: cluster.to_string(),
+            cluster: crate::cluster::sanitize_label(cluster),
             genesis_hash: genesis.to_string(),
             description: description.to_string(),
             required_signers: signers.iter().map(|k| k.to_string()).collect(),
@@ -71,9 +71,13 @@ impl TxFile {
 
     pub fn load(path: &Path) -> Result<TxFile> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| Error(format!("cannot read {}: {}", path.display(), e.kind())))?;
-        serde_json::from_str(&text)
-            .map_err(|e| Error(format!("{} is not a setl8-admin transaction file: {e}", path.display())))
+            .map_err(|e| Error(format!("cannot read {}: {}", crate::cluster::safe_path(path), e.kind())))?;
+        let mut file: TxFile = serde_json::from_str(&text).map_err(|e| {
+            Error(format!("{} is not a setl8-admin transaction file: {e}", crate::cluster::safe_path(path)))
+        })?;
+        // older files carry the full RPC URL in `cluster`; keep only its host from here on
+        file.cluster = crate::cluster::sanitize_label(&file.cluster);
+        Ok(file)
     }
 
     /// Writes next to the target and renames, so a crash never leaves half a file.
@@ -82,8 +86,10 @@ impl TxFile {
             .map_err(|_| Error("cannot serialise the transaction file".into()))?
             + "\n";
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(|e| Error(format!("cannot write {}: {}", tmp.display(), e.kind())))?;
-        std::fs::rename(&tmp, path).map_err(|e| Error(format!("cannot replace {}: {}", path.display(), e.kind())))?;
+        std::fs::write(&tmp, text)
+            .map_err(|e| Error(format!("cannot write {}: {}", crate::cluster::safe_path(&tmp), e.kind())))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| Error(format!("cannot replace {}: {}", crate::cluster::safe_path(path), e.kind())))?;
         Ok(())
     }
 

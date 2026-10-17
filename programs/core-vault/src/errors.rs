@@ -170,4 +170,12 @@ pub enum VaultError {
     /// payments bring the total down. Appended last so no earlier error code moves.
     #[msg("this request would take the vault's open claims above the hard ceiling")]
     ClaimsCeilingExceeded,
+
+    /// `register_product` or `update_product_config` got a `challenge_sizes` list in which
+    /// two entries have the same `size` (the costs do not matter: equal or different, it is
+    /// refused). A reset is priced from the one tier of the failed record's size, so a second
+    /// tier of that size could only make the price ambiguous or redundant. Refused calls
+    /// change nothing. Appended last so no earlier error code moves.
+    #[msg("two challenge sizes in the list have the same size; each size may appear only once")]
+    DuplicateChallengeSize,
 }

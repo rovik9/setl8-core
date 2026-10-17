@@ -40,6 +40,27 @@ fn failed_at(tiers: &[(u64, u64)], bought: (u64, u64)) -> (Env, Sector, Pubkey) 
     (e, s, w)
 }
 
+/// A registry that holds `tiers` (which may repeat a size) while a record of `bought` is `Failed`.
+///
+/// `register_product` and `update_product_config` now refuse a repeated size, so such a registry
+/// can no longer be BUILT through the program. One can still exist on chain (a registry written
+/// before the check), and `deposit_reset` keeps scanning every entry for exactly that case, so the
+/// registry account is written directly: the product is registered with the first entry of each
+/// size, the record is bought and failed, and then the full `tiers` list is stored in the account.
+fn failed_in_legacy_registry(tiers: &[(u64, u64)], bought: (u64, u64)) -> (Env, Sector, Pubkey) {
+    let mut distinct: Vec<(u64, u64)> = vec![];
+    for t in std::iter::once(&bought).chain(tiers.iter()) {
+        if distinct.iter().all(|d| d.0 != t.0) {
+            distinct.push(*t);
+        }
+    }
+    let (mut e, s, w) = failed_at(&distinct, bought);
+    let legacy: Vec<ChallengeSize> = tiers.iter().map(|&(size, cost)| ChallengeSize { size, cost }).collect();
+    e.set_registry(&s, |r| r.challenge_sizes = legacy);
+    assert_eq!(e.registry(&s).challenge_sizes.len(), tiers.len(), "the legacy registry was written");
+    (e, s, w)
+}
+
 fn reset(e: &mut Env, s: &Sector, w: &Pubkey, amount: u64, phase: u8) -> litesvm::types::TransactionResult {
     e.fund_wallet(w);
     let ix = reset_ix(e, s, w, 1, 2, amount, phase);
@@ -308,11 +329,12 @@ fn a_changed_reset_table_applies_to_pending_resets_too() {
 
 #[test]
 fn two_tiers_of_the_same_size_with_different_costs_are_ambiguous() {
-    // Allowed to be registered (no registration-time check); the trader can even buy either one
-    // (deposit_fee matches the exact (size, cost) pair). The reset has no way to know which.
+    // Registration refuses this now (see below), so the registry is written directly: it stands for
+    // a registry stored before the check existed. The trader could buy either one (deposit_fee
+    // matches the exact (size, cost) pair). The reset has no way to know which.
     let tiers = [(10_000u64, 100u64), (50_000, 400), (10_000, 150)];
     for bought in [tiers[0], tiers[2]] {
-        let (mut e, s, w) = failed_at(&tiers, bought);
+        let (mut e, s, w) = failed_in_legacy_registry(&tiers, bought);
         for cost in [100u64, 150, 400] {
             for phase in [0u8, 1, 4] {
                 let amount = reset_amount(cost, LEV_LADDER[phase as usize]).unwrap();
@@ -334,7 +356,7 @@ fn ambiguity_is_detected_for_every_position_of_the_odd_one_out() {
     // [A, A, B], [A, B, A], [B, A, A] and a conflict that only shows in the last entry
     let (a, b) = ((10_000u64, 100u64), (10_000u64, 101u64));
     for tiers in [vec![a, a, b], vec![a, b, a], vec![b, a, a], vec![a, (7, 7), (8, 8), (9, 9), a, b]] {
-        let (mut e, s, w) = failed_at(&tiers, a);
+        let (mut e, s, w) = failed_in_legacy_registry(&tiers, a);
         assert_refused(&mut e, &s, &w, reset_amount(100, LEV_LADDER[0]).unwrap(), 0, VaultError::InvalidChallengeTier);
         assert_refused(&mut e, &s, &w, reset_amount(101, LEV_LADDER[0]).unwrap(), 0, VaultError::InvalidChallengeTier);
         // fixing the registry (dropping the odd one out) fixes the reset
@@ -346,7 +368,7 @@ fn ambiguity_is_detected_for_every_position_of_the_odd_one_out() {
 #[test]
 fn two_tiers_of_the_same_size_and_the_same_cost_are_not_ambiguous() {
     for tiers in [vec![(10_000u64, 100u64), (10_000, 100)], vec![(10_000, 100), (50_000, 400), (10_000, 100), (10_000, 100)]] {
-        let (mut e, s, w) = failed_at(&tiers, (10_000, 100));
+        let (mut e, s, w) = failed_in_legacy_registry(&tiers, (10_000, 100));
         assert_refused(&mut e, &s, &w, 114, 1, VaultError::WrongAmount);
         assert_ok(reset(&mut e, &s, &w, 115, 1));
         assert_eq!(e.trader(&s, &w, 2).account_size, 10_000);

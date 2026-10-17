@@ -41,8 +41,15 @@
 //! looked up in the registry AS IT IS WHEN THE RESET IS SENT (a missing tier, or two
 //! entries of that size with different costs, is `InvalidChallengeTier`). The generator
 //! steers towards non-proportional tier prices, costs that do not divide evenly, a tier
-//! removed / repriced / duplicated by `update_product_config` between a failure and the
-//! reset (and re-added afterwards), and duplicate-size tiers.
+//! removed / repriced by `update_product_config` between a failure and the reset (and
+//! re-added afterwards).
+//!
+//! DUPLICATE SIZES: `register_product` / `update_product_config` refuse a list with two
+//! entries of one size (`DuplicateChallengeSize`, 6044) and the model says so, so the
+//! generator's duplicate configs are rejection tests. A registry that already holds a
+//! duplicate (written before that check existed) is built by the test-side event
+//! `Act::LegacyDup`, which writes the registry account directly; `deposit_reset` must still
+//! price or refuse it exactly as the model says (same cost = fine, different = ambiguous).
 #![allow(clippy::too_many_arguments)]
 
 mod common;
@@ -194,6 +201,9 @@ impl PCfg {
         }
         if self.fee_bps > 10_000 {
             e.push(ev(VaultError::InvalidFeeSplit));
+        }
+        if self.tiers.iter().enumerate().any(|(i, a)| self.tiers[i + 1..].iter().any(|b| b.0 == a.0)) {
+            e.push(ev(VaultError::DuplicateChallengeSize));
         }
         e
     }
@@ -437,6 +447,9 @@ enum Act {
     Dust { addr: Pubkey, lamports: u64, what: &'static str },
     SetTally { s: usize, t: Tally },
     PoolFreeze { c: usize, frozen: bool },
+    /// A registry that holds a repeated size, as one written before `DuplicateChallengeSize`
+    /// existed: the entry is appended to the registry account directly (no instruction can).
+    LegacyDup { s: usize, size: u64, cost: u64 },
 }
 
 impl Act {
@@ -465,6 +478,7 @@ impl Act {
             Act::Dust { .. } => "env:dust",
             Act::SetTally { .. } => "env:tally",
             Act::PoolFreeze { .. } => "env:freeze",
+            Act::LegacyDup { .. } => "env:legacy_dup",
         }
     }
     fn is_program_ix(&self) -> bool {
@@ -987,6 +1001,11 @@ impl Model {
             Act::Dust { .. } => {}
             Act::SetTally { s, t } => m.tallies[*s] = *t,
             Act::PoolFreeze { c, frozen } => m.frozen[*c] = *frozen,
+            Act::LegacyDup { s, size, cost } => {
+                if let Some(pr) = m.prods[*s].as_mut().filter(|p| p.cfg.tiers.len() < 32) {
+                    pr.cfg.tiers.push((*size, *cost));
+                }
+            }
         }
         Ok(Stepped { m, out, evs })
     }
@@ -1799,6 +1818,8 @@ impl Fuzz {
         }
         let mut tiers: Vec<(u64, u64)> = old.tiers.clone();
         let cost_now = model_tier_cost(&tiers, size);
+        // a repeated size can no longer be registered: it is injected into the registry instead
+        let mut legacy_dup: Option<(u64, u64)> = None;
         match self.rng.below(5) {
             0 => tiers.retain(|t| t.0 != size), // removed
             1 => {
@@ -1811,8 +1832,8 @@ impl Fuzz {
                     tiers.push((size, new_cost));
                 }
             }
-            2 => tiers.push((size, cost_now.unwrap_or(100).saturating_add(self.rng.range(1, 50)))), // ambiguous
-            3 => tiers.push((size, cost_now.unwrap_or(100))),                                        // same-cost duplicate
+            2 => legacy_dup = Some((size, cost_now.unwrap_or(100).saturating_add(self.rng.range(1, 50)))), // ambiguous
+            3 => legacy_dup = Some((size, cost_now.unwrap_or(100))),                                        // same-cost duplicate
             _ => {
                 // the size is replaced by neighbours only (no tier of that size at all)
                 tiers.retain(|t| t.0 != size);
@@ -1823,10 +1844,18 @@ impl Fuzz {
         cfg.tiers = tiers;
         if cfg.valid().is_empty() {
             let phase = if cfg.reset_bps.is_empty() { 0 } else { self.rng.idx(cfg.reset_bps.len()) as u8 };
-            let amount = model_reset_amount(cfg, size, phase).unwrap_or_else(|| self.rng.range(0, 200));
+            let mut priced = cfg.clone();
+            if let Some(d) = legacy_dup {
+                priced.tiers.push(d);
+            }
+            let amount = model_reset_amount(&priced, size, phase).unwrap_or_else(|| self.rng.range(0, 200));
             let (ts, tp, tprev) = key;
             let coin = self.pick_coin();
             let new = self.rng.range(10, 14);
+            if let Some((dsize, dcost)) = legacy_dup {
+                // after the update, the registry gets a second entry of the record's size
+                self.queue.push_back(Act::LegacyDup { s, size: dsize, cost: dcost });
+            }
             self.queue.push_back(Act::DepositReset { p: tp, s: ts, c: coin, prev: tprev, new, amount, phase });
             if self.rng.pct(45) {
                 // restore the registry that sold the tier, then retry at the old price
@@ -2488,6 +2517,12 @@ impl Fuzz {
                     }
                 }
             }
+            Act::LegacyDup { s, .. } => {
+                let n = |m: &Model| m.prods[*s].as_ref().map_or(0, |p| p.cfg.tiers.len());
+                if n(new) > n(old) {
+                    t.push("legacy_duplicate:injected".into());
+                }
+            }
             Act::Record { .. } => t.push(format!("record:{:?}", out)),
             Act::BondRequest { p, idx } => {
                 if let Some(b) = old.bonds.get(&(*p, *idx)) {
@@ -2659,6 +2694,12 @@ impl Fuzz {
                 let mut data = vec![0u8; SplAccount::LEN];
                 SplAccount::pack(t, &mut data).unwrap();
                 self.env.svm.set_account(pool, solana_account::Account { data, ..acct }).unwrap();
+            }
+            Act::LegacyDup { s, size, cost } => {
+                if self.m.prods[*s].as_ref().is_some_and(|p| p.cfg.tiers.len() < 32) {
+                    let tier = ChallengeSize { size: *size, cost: *cost };
+                    self.env.set_registry(&w.sectors[*s], |r| r.challenge_sizes.push(tier));
+                }
             }
             Act::SetTally { s, t } => {
                 let sec = &w.sectors[*s];
@@ -3207,14 +3248,15 @@ const REQUIRED_TAGS: &[&str] = &[
     "reset:rejected_tier_missing",
     "reset:rejected_tier_ambiguous",
     "reset:rejected_price_does_not_fit_u64",
+    "legacy_duplicate:injected",
 ];
 
 /// Every reachable error of every instruction must have been produced (and matched
 /// by the model) at least once. 17 = spl-token AccountFrozen (a frozen pool), 0 = system "already in use", 3012 = Anchor
 /// AccountNotInitialized, 600x = VaultError (6000 + variant index).
 const REQUIRED_CODES: &[&str] = &[
-    "register_product:6004", "register_product:6013", "register_product:6024", "register_product:0",
-    "update_product_config:6024", "pause_product:6014", "reconcile_product:6014", "reconcile_product:6034",
+    "register_product:6004", "register_product:6013", "register_product:6024", "register_product:6044", "register_product:0",
+    "update_product_config:6024", "update_product_config:6044", "pause_product:6014", "reconcile_product:6014", "reconcile_product:6034",
     "deposit_fee:6001", "deposit_fee:6006", "deposit_fee:6023", "deposit_fee:0",
     "deposit_reset:6001", "deposit_reset:6006", "deposit_reset:6007", "deposit_reset:6011", "deposit_reset:6012", "deposit_reset:0",
     "record_activity:6005", "flag_trader_failed:6005", "mark_abandoned:6005", "mark_abandoned:6010",

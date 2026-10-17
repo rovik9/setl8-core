@@ -198,6 +198,31 @@ fn a_second_admin_instruction_is_flagged() {
 }
 
 #[test]
+fn a_repeated_tier_size_in_a_register_or_update_transaction_is_flagged() {
+    use setl8_admin::admin_ix::{Product, Tier};
+    let w = World::with_vault();
+    // different cost, then the same cost
+    for tiers in [
+        vec![Tier { size: 9, cost: 1 }, Tier { size: 9, cost: 2 }],
+        vec![Tier { size: 9, cost: 1 }, Tier { size: 9, cost: 1 }],
+    ] {
+        for update in [false, true] {
+            let prod = Product {
+                product_program_id: Pubkey::new_unique(),
+                fee_split_bps: 100,
+                challenge_sizes: tiers.clone(),
+                max_payout_count: 3,
+                reset_price_bps: vec![10_000],
+            };
+            let admin = if update { AdminIx::UpdateProductConfig(prod) } else { AdminIx::RegisterProduct(prod) };
+            let ixs = build_instructions(&w.keys, &parts_of(&w, admin));
+            forged(&w, "x.json", &ixs, &w.keys.sl8);
+            assert_unsignable(&w, "x.json", "the tier size 9 is listed more than once", &[]);
+        }
+    }
+}
+
+#[test]
 fn an_spl_token_transfer_is_flagged() {
     let w = World::with_vault();
     let p = parts_of(&w, good_withdraw(&w));
