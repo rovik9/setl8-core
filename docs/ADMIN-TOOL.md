@@ -18,7 +18,7 @@ Companion documents: [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) (when to run whi
 | `status` | RPC, read-only | decodes the vault: pools, reserve, claims and ceiling headroom, cycle, bonds, products |
 | `nonce-create` / `nonce-advance` | RPC | create the durable-nonce account / invalidate every outstanding signed transaction |
 
-**What travels between machines is one file, `tx.json`.** It holds the serialized message (base64), the signatures collected so far, and some advisory metadata (cluster, description, signer list, message hash). The metadata is for people: `inspect` re-derives all of it from the message bytes and exits non-zero, loudly, if the file disagrees.
+**What travels between machines is one file, `tx.json`.** It holds the serialized message (base64), the signatures collected so far, and some advisory metadata (cluster, description, signer list, message hash). For a custom RPC cluster the `cluster` field says `custom (rpc.example.com)`: the host only, because RPC URLs carry API keys (in the path, the query or the userinfo) and this file is passed around; the tool never writes, prints or logs the URL itself. A file written by an older version that still has the full URL in that field is scrubbed when it is loaded. The metadata is for people: `inspect` re-derives all of it from the message bytes and exits non-zero, loudly, if the file disagrees.
 
 ### What a transaction contains (the allowlist)
 
@@ -95,7 +95,9 @@ Replace `<c>` with `devnet`, `mainnet` or `localnet`, and `<NONCE>` with the non
 
 `reset_price_bps` is in basis points of the **tier price** (the `cost` of the tier whose `size` equals the failed record's size), `10000` = 100%, rounded up, indexed by the 0-based phase the trader failed in. The example is the lev-trading ladder: 100%, 115%, 120%, 127.5%, 130%. There is no upper bound, and the register plan prints the table as "bps of the TIER PRICE". Do not use the old meaning (basis points of the account size): `[100, 150]` now prices a reset at 1% and 1.5% of the tier price. Never reprice or remove a tier with `update-product-config` while `Failed` records exist (SR-22).
 
-`plan` prints a warning for things the program accepts but that are usually a typo (a free tier, `max_payout_count` 0, a reset price above 100% of the tier price, which the lev ladder itself triggers: it is information, not an error).
+`plan` prints a warning for things the program accepts but that are usually a typo (a free tier, `max_payout_count` 0, no tiers). For the reset table it always prints one information line, "reset prices as a percentage of the tier price, by phase: 100%, 115%, 120%, 127.5%, 130%" (also shown by `inspect`, so every signer reads the ladder in plain percentages), and it warns when any value is **below 5000** (50% of the tier price): that looks like a table written for the old meaning of the field, a percentage of the account size such as `[100, 150, 450]`, and a reset would cost 1% to 4.5% of the tier price. Values above 10000 give no warning (the lev ladder is 10000 to 13000, and there is no upper bound). It is a warning, not a refusal.
+
+`plan` **refuses** a `challenge_sizes` list in which two entries have the same `size` (equal cost or not), because the program refuses it too (`DuplicateChallengeSize`, 6044); `inspect` flags such a transaction as unsignable, whoever built it.
 
 For `admin-withdraw`, `plan` reads the live pool (RPC) and **refuses** an amount above what the 25% reserve leaves (`max(stored floor, ceil(25% of the live balance))`), a frozen pool, a missing or frozen SL8 destination account and a zero amount. `--offline` skips that and says so. `inspect` works without a network and says so; with `--rpc` it re-checks the mint against the vault's own record and the amount against the pool as it is now.
 
@@ -146,7 +148,7 @@ A transaction signed against a **durable nonce** stays valid until that nonce is
 
 ## 7. What is tested, and what the tool does not protect against
 
-The suite is `cargo test --manifest-path tools/admin/Cargo.toml --features localnet` (part of `scripts/test-all.sh`), run against the real program in LiteSVM with signature verification on: 90 tests with the `localnet` keys (12 unit tests, 8 ceremony, 31 tamper, 8 nonce, 24 safety, 5 status, 2 RPC) and 14 tests in the default (real-key) build (12 unit, 2 RPC). Highlights:
+The suite is `cargo test --manifest-path tools/admin/Cargo.toml --features localnet` (part of `scripts/test-all.sh`), run against the real program in LiteSVM with signature verification on: 110 tests with the `localnet` keys (18 unit tests, 8 ceremony, 8 leak, 32 tamper, 8 nonce, 29 safety, 5 status, 2 RPC) and 20 tests in the default (real-key) build (18 unit, 2 RPC). Highlights:
 
 | property | tested by |
 |---|---|
@@ -157,6 +159,8 @@ The suite is `cargo test --manifest-path tools/admin/Cargo.toml --features local
 | genesis mismatch refused; mainnet gate cannot be skipped; wrong confirmation does not sign; key-file permissions; no key bytes in any output or file; every `--help` and error path | `tests/safety.rs` |
 | `status` matches the real accounts to the base unit, including a frozen pool and a pool at the claims ceiling | `tests/status.rs` |
 | the JSON-RPC client, against a local mock server | `tests/rpc_http.rs` |
+| a custom RPC URL with a key in its path, query or userinfo never reaches `tx.json`, stdout, stderr, a prompt or an error; an old `tx.json` with the full URL still inspects, signs and sends and is scrubbed | `tests/leak.rs` |
+| a repeated tier size is refused by `plan` and flagged by `inspect`; the reset-price warning fires below 5000 only and the ladder line is always printed | `tests/safety.rs`, `tests/tamper.rs`, `admin_ix` unit tests |
 
 Mutation testing of the safety checks: 51 deliberate bugs in the tool's checks (allowlist, canonical form, metadata trust, signature handling, cluster binding, mainnet gate, confirmation, pre-flight, nonce, key-file and secrecy rules), all killed by the suite; two survived at first and led to two new tests ([SECURITY-REVIEW.md](SECURITY-REVIEW.md), appendix D).
 

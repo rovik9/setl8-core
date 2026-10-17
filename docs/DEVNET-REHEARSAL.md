@@ -260,6 +260,8 @@ Measured on the local validator and, where stated, confirmed in LiteSVM with ide
 
 Rows marked `>10%` are explained in section 6 (items 1 and 2); none exceeds the documented figure except `request_payout` and the pause/reactivate worst case (state size).
 
+Since module 9 the compute table in [SECURITY-REVIEW.md](SECURITY-REVIEW.md) section 4 shows the LiteSVM figure and the real-validator figure from this table side by side. `register_product` (11948 here) was measured before the program refused repeated tier sizes; that check adds about 3,300 CU in LiteSVM and has not been re-measured on a validator.
+
 ## 8. Operational snags
 
 * **Faucet**: the public devnet faucet is limited per IP per day and can be empty; it was the blocker for the devnet run. Plan for ~9 SOL and fund early. There is no account-free alternative.

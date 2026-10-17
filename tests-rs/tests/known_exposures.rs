@@ -1,8 +1,20 @@
-//! Runnable reproductions of the security-review findings that are NOT bugs the code
-//! can fix on its own: each needs a founder decision, or is an accepted, documented
-//! property. Every test PASSES today and pins the current behaviour; if a decision
-//! changes the behaviour, the matching test must be changed on purpose in the same
-//! commit. See docs/SECURITY-REVIEW.md (SR-xx) and docs/THREAT-MODEL.md.
+//! Runnable reproductions of the security-review findings (docs/SECURITY-REVIEW.md, SR-xx).
+//! Every test PASSES today. What each one pins depends on the finding's status:
+//!
+//! * FIXED, and the test was FLIPPED to assert the fix (it used to pin the vulnerable
+//!   behaviour): SR-21 (the $2.5M claims ceiling; module 4b) and SR-03 (a frozen payout pool
+//!   counts as empty; module 4b). The full boundary matrices live in `claims_ceiling.rs` and
+//!   `frozen_pools.rs`; the tests here are the before/after reproductions.
+//! * OPEN, the test pins the current behaviour of an undecided design: SR-02 (a registered
+//!   sector's payout amounts are trusted, bounded only by the ceiling; two tests).
+//! * ACCEPTED (by the founder, or documented), the test pins the accepted behaviour: SR-01
+//!   (the SL8 key can recycle its own bond into pool money), SR-04 (a claim needs both of the
+//!   trader's ATAs), SR-05 (an over-reporting sector can never reconcile again) and SR-06 (a
+//!   front-runner reverts a keeper's batch).
+//!
+//! If a decision changes the behaviour a test pins, change that test on purpose in the same
+//! commit. Findings that have no runnable reproduction here (SR-22, the phase-reset price
+//! following the current tier cost) are pinned where they belong: `reset_price.rs`.
 mod common;
 use anchor_spl::token::spl_token::state::AccountState;
 use common::*;
